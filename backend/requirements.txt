@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+qdrant-edge-py
+llama-index
+fastembed
+gliner
+requests
+pydantic
