@@ -1,0 +1,24 @@
+# Node
+node_modules/
+dist/
+.env
+frontend/node_modules/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.pytest_cache/
+
+# Rust / Tauri
+frontend/src-tauri/target/
+
+# Local Vector Database & Models
+backend/qdrant_storage/
+backend/models/
+*.onnx
+
+# OS generated files
+.DS_Store
+Thumbs.db
