@@ -1,0 +1,14 @@
+2026-09-29 03:23:33,320 [INFO] HTTP Request: GET https://huggingface.co/api/models/urchade/gliner_mediumv2.1/revision/main "HTTP/1.1 307 Temporary Redirect"
+2026-09-29 03:23:34,076 [INFO] HTTP Request: GET https://huggingface.co/api/models/urchade/gliner_medium-v2.1/revision/main "HTTP/1.1 200 OK"
+2026-09-29 03:23:34,104 [INFO] Loading the following GLiNER type: <class 'gliner.model.UniEncoderSpanGLiNER'>...
+2026-09-29 03:23:34,326 [INFO] HTTP Request: HEAD https://huggingface.co/microsoft/deberta-v3-base/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+2026-09-29 03:23:34,341 [INFO] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/microsoft/deberta-v3-base/8ccc9b6f36199bec6961081d44eb72fb3f7353f3/config.json?%2Fmicrosoft%2Fdeberta-v3-base%2Fresolve%2Fmain%2Fconfig.json=&etag=%22904b7ba900060d5ff61289fb29bee393189716c7%22 "HTTP/1.1 200 OK"
+2026-09-29 03:23:34,570 [INFO] HTTP Request: HEAD https://huggingface.co/microsoft/deberta-v3-base/resolve/main/tokenizer_config.json "HTTP/1.1 307 Temporary Redirect"
+2026-09-29 03:23:34,587 [INFO] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/microsoft/deberta-v3-base/8ccc9b6f36199bec6961081d44eb72fb3f7353f3/tokenizer_config.json?%2Fmicrosoft%2Fdeberta-v3-base%2Fresolve%2Fmain%2Ftokenizer_config.json=&etag=%22acfd94e399c5659e4bed75f91b4ee24b111fc7a6%22 "HTTP/1.1 200 OK"
+2026-09-29 03:23:34,819 [INFO] HTTP Request: GET https://huggingface.co/api/models/microsoft/deberta-v3-base/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+2026-09-29 03:23:35,050 [INFO] HTTP Request: GET https://huggingface.co/api/models/microsoft/deberta-v3-base/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+2026-09-29 03:23:35,727 [INFO] HTTP Request: GET https://huggingface.co/api/models/microsoft/deberta-v3-base "HTTP/1.1 200 OK"
+2026-09-29 03:23:35,967 [INFO] HTTP Request: HEAD https://huggingface.co/microsoft/deberta-v3-base/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+2026-09-29 03:23:35,967 [WARNING] Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-09-29 03:23:35,976 [INFO] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/microsoft/deberta-v3-base/8ccc9b6f36199bec6961081d44eb72fb3f7353f3/config.json?%2Fmicrosoft%2Fdeberta-v3-base%2Fresolve%2Fmain%2Fconfig.json=&etag=%22904b7ba900060d5ff61289fb29bee393189716c7%22 "HTTP/1.1 200 OK"
+2026-09-29 03:23:42,062 [INFO] EVENT: SYSTEM_BOOT | DETAILS: Edge node initialized successfully with hardware safeguards. | PROOF_HASH: adef6c5d794021947819fc9bc43aed62d471ad86ddbd50e9adb63311e5cada32
