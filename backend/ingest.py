@@ -2,9 +2,16 @@ import os
 from pathlib import Path
 from fastembed import TextEmbedding, SparseTextEmbedding
 from gliner import GLiNER
-from qdrant_edge import EdgeShard, Point, UpdateOperation, SparseVector
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    PointStruct,
+    VectorParams,
+    SparseVectorParams,
+    Distance,
+    SparseVector
+)
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).resolve().parent
 STORAGE_PATH = str(BASE_DIR / "qdrant_storage")
 
 print("1. Loading AI Models into System CPU RAM...")
@@ -17,9 +24,23 @@ sparse_model = SparseTextEmbedding("Qdrant/bm25")
 # GLiNER for zero-shot privacy detection
 privacy_model = GLiNER.from_pretrained("urchade/gliner_small-v2.1")
 
-# Load our local EdgeShard memory
-print("2. Connecting to local Qdrant EdgeShard...")
-shard = EdgeShard.load(STORAGE_PATH)
+# Connect to local Qdrant instance
+print("2. Connecting to local Qdrant storage...")
+client = QdrantClient(path=STORAGE_PATH)
+
+COLLECTION_NAME = "quadnode_memories"
+
+# Initialize collection if it doesn't exist
+if not client.collection_exists(COLLECTION_NAME):
+    client.create_collection(
+        collection_name=COLLECTION_NAME,
+        vectors_config={
+            "dense": VectorParams(size=256, distance=Distance.COSINE)
+        },
+        sparse_vectors_config={
+            "sparse": SparseVectorParams()
+        }
+    )
 
 def process_and_store(doc_id: int, text: str):
     print(f"\nProcessing Document {doc_id}...")
@@ -42,7 +63,7 @@ def process_and_store(doc_id: int, text: str):
     sparse_result = list(sparse_model.embed([text]))[0]
     
     # --- LOCAL MEMORY INSERTION ---
-    point = Point(
+    point = PointStruct(
         id=doc_id,
         vector={
             "dense": optimized_dense,
@@ -57,7 +78,10 @@ def process_and_store(doc_id: int, text: str):
         }
     )
     
-    shard.update(UpdateOperation.upsert_points([point]))
+    client.upsert(
+        collection_name=COLLECTION_NAME,
+        points=[point]
+    )
     print(f"Successfully inserted into Qdrant Edge.")
 
 if __name__ == "__main__":
