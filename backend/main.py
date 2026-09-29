@@ -151,10 +151,13 @@ def chat_with_memory(req: ChatRequest):
     print("[2] Engaging Cross-Encoder Re-ranker...")
     passages = [{"id": hit.id, "text": hit.payload.get('text', '')} for hit in results]
     
-    rerank_request = {
-        "query": req.query,
-        "passages": passages
-    }
+    # Custom object to bypass FlashRank versioning import errors
+    class RerankPayload:
+        def __init__(self, query, passages):
+            self.query = query
+            self.passages = passages
+
+    rerank_request = RerankPayload(query=req.query, passages=passages)
     reranked_results = reranker.rerank(rerank_request)
     
     # Stage 3: Agentic Anti-Hallucination Thresholding
