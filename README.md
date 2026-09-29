@@ -2,20 +2,19 @@
 
 QuadNode is an offline-first, edge-native AI memory architecture designed to eliminate hallucinations, enforce cryptographic data privacy, and deliver sub-millisecond retrieval speeds entirely on local hardware. 
 
-By unifying **zero-shot privacy guardrails**, **hybrid vector search**, **cross-encoder re-ranking**, and **local LLM reasoning**, QuadNode creates a self-aware memory assistant that operates with 100% data sovereignty.
+By unifying **zero-shot privacy guardrails**, **hybrid vector search**, **cross-encoder re-ranking**, and **local LLM reasoning**, QuadNode creates a self-aware memory assistant that operates with 100% data sovereignty. It features a distributed dual-database architecture for intelligent edge-to-cloud synchronization.
 
 ---
 
 ## 🧠 Architectural Pipeline
-
 ```text
        [User Input / Text Document]
                     │
                     ▼
  ┌──────────────────────────────────────┐
- │  1. Zero-Shot PII Guardrail (GLiNER) │ ──► Flags Credentials / Passwords
+ │  1. Zero-Shot PII Guardrail (GLiNER) │ ──► Flags Credentials (LOCAL_ONLY vs PENDING)
  └──────────────────────────────────────┘
-                    │ (Cleared Data)
+                    │
                     ▼
  ┌──────────────────────────────────────┐
  │  2. Vectorization (Nomic FastEmbed)  │ ──► 256-d Dense Vector Matryoshka
@@ -23,7 +22,7 @@ By unifying **zero-shot privacy guardrails**, **hybrid vector search**, **cross-
                     │
                     ▼
  ┌──────────────────────────────────────┐
- │  3. Local Vector Storage (Qdrant)    │ ──► Stage 1 Recall (Top-10 Matches)
+ │  3. Local Vector Storage (Qdrant)    │ ──► Edge DB Recall (Top-10 Matches)
  └──────────────────────────────────────┘
                     │
                     ▼
@@ -38,15 +37,16 @@ By unifying **zero-shot privacy guardrails**, **hybrid vector search**, **cross-
                     │
                     ▼
  ┌──────────────────────────────────────┐
- │ 6. Cryptographic Audit Log (SHA-256) │ ──► Appends Proof Hash to audit.log
+ │ 6. Edge-to-Cloud Sync Engine         │ ──► Pushes PENDING vectors to Cloud Server
  └──────────────────────────────────────┘
 ```
+
 ---
 ## 🛠️ Technology Stack & Engine
 
 | Component | Technology | Purpose |
 | :--- | :--- | :--- |
-| **Vector Storage** | **Qdrant** | High-speed, embedded vector database running locally in `qdrant_storage/`. |
+| **Vector Storage** | **Qdrant** | High-speed dual databases (`qdrant_edge/` and `qdrant_cloud_sim/`). |
 | **Dense Embedding** | **FastEmbed** | Lightweight, high-accuracy semantic vector representations (`nomic-embed-text-v1.5`). |
 | **Re-Ranking** | **FlashRank** | Cross-encoder precision scoring that eliminates context noise (`ms-marco-MiniLM-L-12-v2`). |
 | **Privacy Filter** | **GLiNER** | Zero-shot Named Entity Recognition to quarantine sensitive tokens. |
@@ -60,10 +60,10 @@ By unifying **zero-shot privacy guardrails**, **hybrid vector search**, **cross-
 ```text
 QuadNode/
 ├── backend/                  # FastAPI Python Sidecar
-│   ├── main.py               # Core inference & API routing
-│   ├── ingest.py             # CLI ingestion tool
+│   ├── main.py               # Distributed inference & API routing
 │   ├── audit.log             # Cryptographic SHA-256 ledger
-│   └── qdrant_storage/       # Local vector database
+│   ├── qdrant_edge/          # Local vector database (Edge memory)
+│   └── qdrant_cloud_sim/     # Simulated Centralized Server (Cloud memory)
 ├── frontend/                 # Tauri v2 + React UI (Managed separately)
 ├── run.bat                   # One-click Windows startup script
 └── requirements.txt          # Python ML dependencies
@@ -114,8 +114,11 @@ Bash
 python -m uvicorn backend.main:app --reload
 ```
 ## 🔌 API Reference & Usage
-1. Ingest New Memory (POST /ingest)
-Adds text to the local Qdrant vector database after validating it through the GLiNER privacy scanner.
+1. System Telemetry (`GET /status`)
+Returns live metrics on edge memories, cloud synchronization queues, and local privacy quarantines.
+```bash
+curl [http://127.0.0.1:8000/status](http://127.0.0.1:8000/status)
+```
 
 Endpoint: http://127.0.0.1:8000/ingest
 
@@ -166,7 +169,7 @@ cURL Execution:
 ```
 Bash
 
-curl -X POST "[http://127.0.0.1:8000/chat](http://127.0.0.1:8000/chat)" \
+curl -X POST "[http://127.0.0.1:8000/sync](http://127.0.0.1:8000/sync)" \
   -H "Content-Type: application/json" \
   -d "{\"query\": \"What is the frontend architecture built with?\"}"
   ```
@@ -187,11 +190,11 @@ JSON
 
 ---
 ## 🚀 Future Roadmap
-Hardware Auto-Tuning: Dynamic model quantization fallback based on available VRAM.
+* **Hardware Auto-Tuning**: Dynamic model quantization fallback based on available VRAM.
 
-Multi-Modal Memory: Expanding Qdrant storage to accept image embeddings.
+* **Multi-Modal Memory**: Expanding Qdrant storage to accept image embeddings.
 
-Federated Sync: Secure, end-to-end encrypted peer syncing for cleared, non-PII vector data.
+* **Multi-Device Mesh:** Peer-to-peer syncing for distributed edge nodes in zero-connectivity zones.
 
 ---
 ## 🛠️ Troubleshooting Guide
