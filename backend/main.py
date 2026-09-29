@@ -16,197 +16,190 @@ from flashrank import Ranker
 from gliner import GLiNER
 
 BASE_DIR = Path(__file__).resolve().parent
-STORAGE_PATH = str(BASE_DIR / "qdrant_storage")
 LOG_PATH = BASE_DIR / "audit.log"
 
-# Configure Secure Audit Logger
 logging.basicConfig(
-    filename=str(LOG_PATH),
-    level=logging.INFO,
+    filename=str(LOG_PATH), level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
 
-app = FastAPI(title="QuadNode Enterprise Edge AI Sidecar")
+app = FastAPI(title="QuadNode Apex Edge Intelligence")
 
-# 1. Initialize Neural Models & Semantic Cache Engine
-print("Booting Enterprise Edge Intelligence Architecture...")
+# 1. Initialize Neural Models
+print("Booting QuadNode Apex Architecture...")
 dense_model = TextEmbedding("nomic-ai/nomic-embed-text-v1.5")
-reranker = Ranker(model_name="ms-marco-MiniLM-L-12-v2", cache_dir=STORAGE_PATH)
+reranker = Ranker(model_name="ms-marco-MiniLM-L-12-v2", cache_dir=str(BASE_DIR / "qdrant_storage"))
 ner_model = GLiNER.from_pretrained("urchade/gliner_mediumv2.1")
-SENSITIVE_LABELS = ["API Key", "Password", "Secret", "Token", "Credential"]
+SENSITIVE_LABELS = ["API Key", "Password", "Secret", "Token", "Credential", "PII"]
 
-shard = None
+# 2. Dual-Database Architecture (Edge vs Cloud Simulation)
+EDGE_DB_PATH = str(BASE_DIR / "qdrant_edge")
+CLOUD_DB_PATH = str(BASE_DIR / "qdrant_cloud_sim")
 COLLECTION_NAME = "quadnode_memory"
-SEMANTIC_CACHE = {} # In-memory high-speed cache for sub-millisecond responses
+
+os.makedirs(EDGE_DB_PATH, exist_ok=True)
+os.makedirs(CLOUD_DB_PATH, exist_ok=True)
+
+edge_db = QdrantClient(path=EDGE_DB_PATH)
+cloud_db = QdrantClient(path=CLOUD_DB_PATH) # Simulates central server for hackathon demo
+
+SEMANTIC_CACHE = {}
 
 class ChatRequest(BaseModel):
     query: str
 
 class IngestRequest(BaseModel):
     text: str
+    source: str = "manual_entry"
 
-def log_audit_event(event_type: str, details: str):
-    """Generates a cryptographic SHA-256 trail for compliance and security audit."""
-    raw_str = f"{time.time()}-{event_type}-{details}"
-    proof_hash = hashlib.sha256(raw_str.encode()).hexdigest()
-    logging.info(f"EVENT: {event_type} | DETAILS: {details} | PROOF_HASH: {proof_hash}")
+class RerankPayload:
+    def __init__(self, query, passages):
+        self.query = query
+        self.passages = passages
+
+def log_audit(event_type: str, details: str):
+    proof_hash = hashlib.sha256(f"{time.time()}-{event_type}-{details}".encode()).hexdigest()
+    logging.info(f"EVENT: {event_type} | DETAILS: {details} | HASH: {proof_hash}")
 
 @app.on_event("startup")
 async def startup_event():
-    global shard
-    os.makedirs(STORAGE_PATH, exist_ok=True)
-    shard = QdrantClient(path=STORAGE_PATH)
+    for db in [edge_db, cloud_db]:
+        if not db.collection_exists(COLLECTION_NAME):
+            db.create_collection(
+                collection_name=COLLECTION_NAME,
+                vectors_config=VectorParams(size=256, distance=Distance.COSINE)
+            )
+    print("Edge Database, Cloud Server (Simulated), & AI Pipeline Online.")
+
+@app.get("/status")
+def system_status():
+    """Provides live telemetry for the React Frontend Dashboard."""
+    edge_count = edge_db.count(collection_name=COLLECTION_NAME).count
+    cloud_count = cloud_db.count(collection_name=COLLECTION_NAME).count
     
-    if not shard.collection_exists(COLLECTION_NAME):
-        shard.create_collection(
-            collection_name=COLLECTION_NAME,
-            vectors_config=VectorParams(size=256, distance=Distance.COSINE)
-        )
-    print("Enterprise Semantic Engine, Security Ledger, & Caching Active.")
-    log_audit_event("SYSTEM_BOOT", "Edge node initialized successfully with hardware safeguards.")
+    pending = edge_db.count(collection_name=COLLECTION_NAME, count_filter=Filter(
+        must=[FieldCondition(key="sync_status", match=MatchValue(value="PENDING"))]
+    )).count
+    
+    local_only = edge_db.count(collection_name=COLLECTION_NAME, count_filter=Filter(
+        must=[FieldCondition(key="sync_status", match=MatchValue(value="LOCAL_ONLY"))]
+    )).count
+
+    return {
+        "status": "ONLINE",
+        "edge_memories": edge_count,
+        "cloud_memories": cloud_count,
+        "pending_sync": pending,
+        "local_only_secured": local_only,
+        "cache_size": len(SEMANTIC_CACHE)
+    }
 
 @app.post("/ingest")
 def ingest_memory(req: IngestRequest):
-    """Dynamically ingests, sanitizes, and secures memory with zero-shot privacy tracking."""
-    start_time = time.time()
-    print(f"\n[+] Ingestion Triggered: Scanning payload for PII & credentials...")
+    """Creates local memory with rich metadata and Edge-to-Cloud routing logic."""
+    print(f"\n[+] Ingesting: Scanning for privacy risks...")
     
-    # Zero-Shot Privacy Guardrail via GLiNER
+    # Zero-Shot Privacy Guardrail
     entities = ner_model.predict_entities(req.text, SENSITIVE_LABELS)
-    is_safe = len(entities) == 0
+    sync_status = "LOCAL_ONLY" if entities else "PENDING"
     
-    raw_dense = list(dense_model.embed([req.text]))[0]
-    optimized_dense = raw_dense[:256].tolist()
-    
+    optimized_dense = list(dense_model.embed([req.text]))[0][:256].tolist()
     point_id = str(uuid.uuid4())
-    shard.upsert(
+    
+    payload = {
+        "text": req.text,
+        "source": req.source,
+        "sync_status": sync_status,
+        "timestamp": time.time()
+    }
+    
+    edge_db.upsert(
         collection_name=COLLECTION_NAME,
-        points=[
-            PointStruct(
-                id=point_id,
-                vector=optimized_dense,
-                payload={
-                    "text": req.text,
-                    "sync_allowed": is_safe,
-                    "timestamp": time.time()
-                }
-            )
-        ]
+        points=[PointStruct(id=point_id, vector=optimized_dense, payload=payload)]
     )
     
-    status = "Secured (Local-Only Restricted)" if not is_safe else "Publicly Cleared"
-    latency = round((time.time() - start_time) * 1000, 2)
+    log_audit("INGESTION", f"ID: {point_id} | Status: {sync_status}")
+    print(f"[+] Memory Committed. State: {sync_status}")
+    return {"status": "success", "id": point_id, "sync_state": sync_status}
+
+@app.post("/sync")
+def synchronize_edge_to_cloud():
+    """Simulates internet restoration: Pushes PENDING data to Cloud, locks LOCAL_ONLY."""
+    print("\n[~] Internet Connection Detected. Initiating Edge-to-Cloud Sync...")
     
-    log_audit_event("INGESTION", f"ID: {point_id} | Status: {status} | Latency: {latency}ms")
-    print(f"[+] Memory Committed: {status} in {latency}ms")
+    pending_points = edge_db.scroll(
+        collection_name=COLLECTION_NAME,
+        scroll_filter=Filter(must=[FieldCondition(key="sync_status", match=MatchValue(value="PENDING"))]),
+        limit=100,
+        with_payload=True,
+        with_vectors=True
+    )[0]
     
-    return {
-        "status": "success", 
-        "privacy_flagged": not is_safe, 
-        "id": point_id, 
-        "execution_time_ms": latency
-    }
+    if not pending_points:
+        return {"status": "success", "synced_count": 0, "message": "All edge data is fully synchronized."}
+    
+    synced_ids = []
+    for point in pending_points:
+        # Push to Cloud DB
+        cloud_db.upsert(
+            collection_name=COLLECTION_NAME,
+            points=[PointStruct(id=point.id, vector=point.vector, payload=point.payload)]
+        )
+        
+        # Update Local Edge DB to SYNCED
+        updated_payload = point.payload.copy()
+        updated_payload["sync_status"] = "SYNCED"
+        edge_db.set_payload(collection_name=COLLECTION_NAME, payload=updated_payload, points=[point.id])
+        synced_ids.append(point.id)
+        log_audit("CLOUD_SYNC", f"Successfully federated memory ID: {point.id}")
+
+    print(f"[~] Sync Complete. {len(synced_ids)} memories pushed to cloud.")
+    return {"status": "success", "synced_count": len(synced_ids), "synced_ids": synced_ids}
 
 @app.post("/chat")
 def chat_with_memory(req: ChatRequest):
+    """Retrieves context from Edge DB (Allows reading LOCAL_ONLY for local intelligence)."""
     start_time = time.time()
     query_clean = req.query.strip().lower()
-    print(f"\n[1] Enterprise Query Received: {req.query}")
     
-    # Milestone 1: Semantic Cache Lookup (Sub-Millisecond Return)
     if query_clean in SEMANTIC_CACHE:
-        print("[CACHE HIT] Serving response instantly from high-speed memory cache.")
-        log_audit_event("CACHE_HIT", f"Query: {req.query}")
-        return {
-            "query": req.query,
-            "response": SEMANTIC_CACHE[query_clean],
-            "sources": ["[Cached Memory Vector Match]"],
-            "cache_hit": True,
-            "execution_time_ms": round((time.time() - start_time) * 1000, 2)
-        }
+        return {"response": SEMANTIC_CACHE[query_clean], "cache_hit": True, "time_ms": round((time.time() - start_time) * 1000, 2)}
 
-    # Stage 1: Broad Dense Retrieval (Recall N=10)
-    raw_dense = list(dense_model.embed([req.query]))[0]
-    optimized_dense = raw_dense[:256].tolist() 
+    optimized_dense = list(dense_model.embed([req.query]))[0][:256].tolist() 
     
-    results = shard.query_points(
+    # Notice: NO FILTER. The local AI can read all data (SYNCED, PENDING, and LOCAL_ONLY).
+    results = edge_db.query_points(
         collection_name=COLLECTION_NAME,
         query=optimized_dense,
         limit=10, 
-        query_filter=Filter(
-            must=[FieldCondition(key="sync_allowed", match=MatchValue(value=True))]
-        ),
         with_payload=True
     ).points
     
     if not results:
-        return {
-            "query": req.query, 
-            "response": "I don't have this in my memory yet. Would you like to ingest it?", 
-            "sources": [],
-            "cache_hit": False
-        }
+        return {"response": "I have no memory regarding this on the edge device.", "sources": []}
     
-    # Stage 2: Cross-Encoder Precision Re-ranking
-    print("[2] Engaging Cross-Encoder Re-ranker...")
     passages = [{"id": hit.id, "text": hit.payload.get('text', '')} for hit in results]
+    reranked_results = reranker.rerank(RerankPayload(query=req.query, passages=passages))
     
-    # Custom object to bypass FlashRank versioning import errors
-    class RerankPayload:
-        def __init__(self, query, passages):
-            self.query = query
-            self.passages = passages
-
-    rerank_request = RerankPayload(query=req.query, passages=passages)
-    reranked_results = reranker.rerank(rerank_request)
-    
-    # Stage 3: Agentic Anti-Hallucination Thresholding
-    top_k = []
-    for doc in reranked_results[:3]:
-        if doc['score'] > 0.05:
-            top_k.append(f"- {doc['text']} [Confidence: {doc['score']:.4f}]")
+    top_k = [f"- {doc['text']} [Confidence: {doc['score']:.4f}]" for doc in reranked_results[:3] if doc['score'] > 0.05]
     
     if not top_k:
-        print("[!] High-confidence threshold failed. Refusing to hallucinate.")
-        log_audit_event("GUARDRAIL_TRIGGER", f"Low confidence refusal for query: {req.query}")
-        return {
-            "query": req.query, 
-            "response": "I found related data blocks, but their semantic confidence is too low. Refusing to hallucinate.", 
-            "sources": [],
-            "cache_hit": False
-        }
+        return {"response": "Context found, but confidence too low to answer securely.", "sources": []}
         
-    context_str = "\n".join(top_k)
+    system_prompt = f"You are an offline Edge AI. Use ONLY these verified local memories:\n{chr(10).join(top_k)}"
     
-    # Stage 4: Secure Local LLM Generation via Ollama
-    system_prompt = f"""You are the QuadNode Enterprise Edge AI. Use ONLY the verified memories below. Never guess.
-    
-    VERIFIED MEMORIES:
-    {context_str}
-    """
-    
-    print("[4] Generating Secure Edge Inference (Llama-3.1)...")
-    try:
-        response = ollama.chat(model='llama3.1', messages=[
-            {'role': 'system', 'content': system_prompt},
-            {'role': 'user', 'content': req.query}
-        ], options={'temperature': 0.1}) # Low temperature for strict factual adherence
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ollama execution error: {str(e)}")
+    response = ollama.chat(model='llama3.1', messages=[
+        {'role': 'system', 'content': system_prompt},
+        {'role': 'user', 'content': req.query}
+    ], options={'temperature': 0.1})
     
     final_answer = response['message']['content']
-    
-    # Save to semantic cache
     SEMANTIC_CACHE[query_clean] = final_answer
     
-    total_time = round((time.time() - start_time) * 1000, 2)
-    log_audit_event("INFERENCE", f"Query processed successfully in {total_time}ms")
-    print(f"[5] Execution Complete in {total_time}ms.")
-    
+    log_audit("INFERENCE", f"Edge reasoning completed in {round((time.time() - start_time) * 1000, 2)}ms")
     return {
-        "query": req.query, 
         "response": final_answer, 
         "sources": top_k,
         "cache_hit": False,
-        "execution_time_ms": total_time
+        "time_ms": round((time.time() - start_time) * 1000, 2)
     }

@@ -88,3 +88,19 @@
 2026-09-29 15:04:43,322 [INFO] EVENT: INGESTION | DETAILS: ID: 8f1882c6-5ccb-4555-b019-c589652acaf0 | Status: Publicly Cleared | Latency: 882.52ms | PROOF_HASH: 7fd0966496e6d3ca2eaa945574c75b9daf7d8992e0ca4a662b5381d229281950
 2026-09-29 15:04:54,649 [INFO] HTTP Request: POST http://127.0.0.1:11434/api/chat "HTTP/1.1 200 OK"
 2026-09-29 15:04:54,650 [INFO] EVENT: INFERENCE | DETAILS: Query processed successfully in 1134.49ms | PROOF_HASH: ab4020c672e51919476f26b4ff1868b530b3bc12bdeea1f910737219d9a0c2d7
+2026-09-30 00:11:34,917 [INFO] HTTP Request: GET https://huggingface.co/api/models/urchade/gliner_mediumv2.1/revision/main "HTTP/1.1 307 Temporary Redirect"
+2026-09-30 00:11:35,159 [INFO] HTTP Request: GET https://huggingface.co/api/models/urchade/gliner_medium-v2.1/revision/main "HTTP/1.1 200 OK"
+2026-09-30 00:11:35,228 [INFO] Loading the following GLiNER type: <class 'gliner.model.UniEncoderSpanGLiNER'>...
+2026-09-30 00:11:35,510 [INFO] HTTP Request: HEAD https://huggingface.co/microsoft/deberta-v3-base/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+2026-09-30 00:11:35,523 [INFO] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/microsoft/deberta-v3-base/8ccc9b6f36199bec6961081d44eb72fb3f7353f3/config.json?%2Fmicrosoft%2Fdeberta-v3-base%2Fresolve%2Fmain%2Fconfig.json=&etag=%22904b7ba900060d5ff61289fb29bee393189716c7%22 "HTTP/1.1 200 OK"
+2026-09-30 00:11:35,817 [INFO] HTTP Request: HEAD https://huggingface.co/microsoft/deberta-v3-base/resolve/main/tokenizer_config.json "HTTP/1.1 307 Temporary Redirect"
+2026-09-30 00:11:35,819 [WARNING] Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+2026-09-30 00:11:35,830 [INFO] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/microsoft/deberta-v3-base/8ccc9b6f36199bec6961081d44eb72fb3f7353f3/tokenizer_config.json?%2Fmicrosoft%2Fdeberta-v3-base%2Fresolve%2Fmain%2Ftokenizer_config.json=&etag=%22acfd94e399c5659e4bed75f91b4ee24b111fc7a6%22 "HTTP/1.1 200 OK"
+2026-09-30 00:11:36,123 [INFO] HTTP Request: GET https://huggingface.co/api/models/microsoft/deberta-v3-base/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+2026-09-30 00:11:36,355 [INFO] HTTP Request: GET https://huggingface.co/api/models/microsoft/deberta-v3-base/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+2026-09-30 00:11:37,143 [INFO] HTTP Request: GET https://huggingface.co/api/models/microsoft/deberta-v3-base "HTTP/1.1 200 OK"
+2026-09-30 00:11:37,415 [INFO] HTTP Request: HEAD https://huggingface.co/microsoft/deberta-v3-base/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+2026-09-30 00:11:37,440 [INFO] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/microsoft/deberta-v3-base/8ccc9b6f36199bec6961081d44eb72fb3f7353f3/config.json?%2Fmicrosoft%2Fdeberta-v3-base%2Fresolve%2Fmain%2Fconfig.json=&etag=%22904b7ba900060d5ff61289fb29bee393189716c7%22 "HTTP/1.1 200 OK"
+2026-09-30 00:12:55,910 [INFO] EVENT: INGESTION | DETAILS: ID: 75ed80a1-3942-4f4e-a1e3-0f0f03f9f208 | Status: PENDING | HASH: 6477923a853c536097f95d9d6f98947e87ac0f8c39af868be8f2c476cc3f04b7
+2026-09-30 00:18:41,570 [INFO] EVENT: INGESTION | DETAILS: ID: 023751f8-c856-430a-af54-fcb554df5ca3 | Status: LOCAL_ONLY | HASH: b2e5c79d6a9c57369a1ddadc6e23fccf0a9167e9c7e709e05d33215d429aeffb
+2026-09-30 00:20:12,108 [INFO] EVENT: CLOUD_SYNC | DETAILS: Successfully federated memory ID: 75ed80a1-3942-4f4e-a1e3-0f0f03f9f208 | HASH: 275b7ba472b9e65d09dca2cdd84af066a9fd8e2ca67e9333ee57c3821c439377
