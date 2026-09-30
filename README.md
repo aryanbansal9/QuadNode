@@ -1,172 +1,81 @@
-# 🚀 QuadNode: Enterprise-Grade Edge AI Security & Memory Engine
+# QuadNode backend (refactor)
 
-QuadNode is an offline-first, edge-native AI memory architecture designed to eliminate hallucinations, enforce cryptographic data privacy, and deliver sub-millisecond retrieval speeds entirely on local hardware. 
+Offline-first edge memory: chunk -> privacy gate -> hybrid retrieval -> local LLM, with
+version-aware edge<->cloud sync and conflict handling.
 
-By unifying **zero-shot privacy guardrails**, **hybrid vector search**, **cross-encoder re-ranking**, and **local LLM reasoning**, QuadNode creates a self-aware memory assistant that operates with 100% data sovereignty. It features a distributed dual-database architecture for intelligent edge-to-cloud synchronization.
-
----
-
-## 🧠 Architectural Pipeline
-```text
-       [User Input / Text Document]
-                    │
-                    ▼
- ┌──────────────────────────────────────┐
- │  1. Zero-Shot PII Guardrail (GLiNER) │ ──► Flags Credentials (LOCAL_ONLY vs PENDING)
- └──────────────────────────────────────┘
-                    │
-                    ▼
- ┌──────────────────────────────────────┐
- │  2. Vectorization (Nomic FastEmbed)  │ ──► 256-d Dense Vector Matryoshka
- └──────────────────────────────────────┘
-                    │
-                    ▼
- ┌──────────────────────────────────────┐
- │  3. Local Vector Storage (Qdrant)    │ ──► Edge DB Recall (Top-10 Matches)
- └──────────────────────────────────────┘
-                    │
-                    ▼
- ┌──────────────────────────────────────┐
- │ 4. Cross-Encoder Ranker (FlashRank)  │ ──► Stage 2 Precision Scoring (>0.05)
- └──────────────────────────────────────┘
-                    │
-                    ▼
- ┌──────────────────────────────────────┐
- │  5. Local Inference (Ollama Llama3)  │ ──► Factual Generation (Zero Guesswork)
- └──────────────────────────────────────┘
-                    │
-                    ▼
- ┌──────────────────────────────────────┐
- │ 6. Edge-to-Cloud Sync Engine         │ ──► Pushes PENDING vectors to Cloud Server
- └──────────────────────────────────────┘
+## Layout
+```
+backend/
+  config.py     env-driven settings           models.py    record schema + pure helpers
+  chunking.py   sentence-aware chunker        privacy.py   regex + entropy + GLiNER gate (per chunk)
+  embeddings.py Nomic dense + BM25 + rerank   store.py     thread-safe Qdrant collection wrapper
+  retrieval.py  hybrid RRF + rerank + explain service.py   ingest / update / delete (versioned)
+  sync.py       push / pull / conflicts       audit.py     HMAC hash-chained log + SSE fan-out
+  llm.py        Ollama (VRAM auto-pick)       container.py wiring / dependency injection
+  main.py       FastAPI app
+tests/          21 tests (real Qdrant, fake models)
 ```
 
----
-## 🛠️ Technology Stack & Engine
-
-| Component | Technology | Purpose |
-| :--- | :--- | :--- |
-| **Vector Storage** | **Qdrant** | High-speed dual databases (`qdrant_edge/` and `qdrant_cloud_sim/`). |
-| **Dense Embedding** | **FastEmbed** | Lightweight, high-accuracy semantic vector representations (`nomic-embed-text-v1.5`). |
-| **Sparse Embedding** | **SPLADE** | Exact keyword BM25 sparse representations for hybrid retrieval (`Splade_PP_en_v1`). |
-| **Re-Ranking** | **FlashRank** | Cross-encoder precision scoring that eliminates context noise (`ms-marco-MiniLM-L-12-v2`). |
-| **Privacy Filter** | **GLiNER** | Zero-shot Named Entity Recognition to quarantine sensitive tokens. |
-| **LLM Inference** | **Ollama** | Offline, privacy-first local LLM execution (`llama3.1`). |
-| **Caching Layer** | **Semantic Cache** | Sub-millisecond response delivery for recurring queries. |
-| **Compliance** | **SHA-256 Ledger** | Cryptographically signed transaction history saved to `audit.log`. |
-
----
-## 📂 Repository Structure
-
-```text
-QuadNode/
-├── backend/                  # FastAPI Python Sidecar
-│   ├── main.py               # Distributed inference & API routing
-│   ├── audit.log             # Cryptographic SHA-256 ledger
-│   ├── qdrant_edge/          # Local vector database (Edge memory)
-│   └── qdrant_cloud_sim/     # Simulated Centralized Server (Cloud memory)
-├── frontend/                 # Tauri v2 + React UI (Managed separately)
-├── run.bat                   # One-click Windows startup script
-└── requirements.txt          # Python ML dependencies
-```
-
----
-## 📋 Prerequisites & Setup
-
-1. Requirements
-Python: Version 3.10 or higher.
-
-Ollama: Installed and running locally. Pull the inference model before starting:
-```
-Bash
-
-ollama pull llama3.1
-```
-2. Environment Initialization
-Set up your Python virtual environment and install the required machine learning dependencies.
-
-Windows (Command Prompt / PowerShell):
-```
-DOS
-
-python -m venv venv
-venv\Scripts\activate
+## Run
+```bash
+python -m venv venv && venv\Scripts\activate          # Windows
 pip install -r requirements.txt
+ollama pull llama3.1:8b        # (or llama3.2:3b for CPU-only)
+python -m uvicorn backend.main:app --port 8000          # NO --reload (embedded Qdrant file lock)
+pytest -q                                              # no models/GPU needed
 ```
-macOS / Linux:
+Pre-download models once while online (fastembed/flashrank/GLiNER cache into `backend/models`
+or the HF cache); afterwards set `HF_HUB_OFFLINE=1` for a true air-gapped run.
+
+### Real cloud + two devices (recommended demo)
+```bash
+docker run -p 6333:6333 qdrant/qdrant
+set QN_CLOUD_URL=http://localhost:6333
+set QN_DEVICE_ID=EDGE-A  &  python -m uvicorn backend.main:app --port 8000
+set QN_DEVICE_ID=EDGE-B  &  python -m uvicorn backend.main:app --port 8001   # second terminal
 ```
-Bash
+Without `QN_CLOUD_URL` the cloud is an embedded folder (single process only).
 
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
----
-## ⚡ Running QuadNode
+### Env vars (all optional)
+`QN_DEVICE_ID` `QN_CLOUD_URL` `QN_CLOUD_API_KEY` `QN_CONFLICT_POLICY=manual|lww`
+`QN_USE_GLINER=0|1` `QN_PRIVACY_FAIL_CLOSED=1` `QN_LLM_MODEL` `QN_SYNC_INTERVAL` `QN_DATA_DIR`
 
-Method 1: Automated Startup (Windows)
-Double-click run.bat in the root directory. This automatically launches Ollama, activates the virtual environment, and starts the FastAPI sidecar server on http://127.0.0.1:8000.
+## API
+| | |
+|---|---|
+| `POST /ingest {text,source?}` `POST /upload` (pdf/txt/md) | chunk + gate + embed + store |
+| `POST /search {query,k}` | explainable hybrid hits (dense/sparse/fused rank, rerank score, timings) |
+| `POST /chat` `POST /chat/stream` (SSE) | grounded answer; never calls the LLM without evidence |
+| `GET /memories?status=&source=` `GET/PUT/DELETE /memories/{id}` | inspect / edit / delete |
+| `GET /status` `POST /sync` `POST /network {online}` | device + sync state; demo offline switch |
+| `GET /conflicts` `POST /conflicts/{id}/resolve {strategy}` | `keep_local` / `keep_remote` / `keep_both` |
+| `GET /activity` `GET /events` (SSE) `GET /audit/verify` | activity feed, live stream, tamper check |
+| `POST /privacy/preview {text}` | what the gate would flag + redacted view |
 
-Method 2: Manual Terminal Launch
-Activate your virtual environment and run the Uvicorn server:
-```
-Bash
+## Sync model in one table
+`local_changed = version > synced_version` · `remote_changed = remote.version > synced_version`
 
-python -m uvicorn backend.main:app --reload
-```
----
-## 🔌 API Reference & Usage
-### 1. System Telemetry (`GET /status`)
-Returns live metrics on edge memories, cloud synchronization queues, and local privacy quarantines.
-``` 
-Bash
+| local changed | remote changed | result |
+|---|---|---|
+| yes | no | PUSH |
+| no | yes | PULL |
+| yes | yes (content differs) | CONFLICT -> manual resolve, or auto last-writer-wins |
+| identical content | | converge bookkeeping only |
 
-curl http://127.0.0.1:8000/status
-```
+`LOCAL_ONLY` chunks are never pushed (checked at the push site too). Deletes propagate as
+tombstones. Editing a synced memory so it now contains a secret retracts it from the cloud.
 
-### 2. Edge-to-Cloud Synchronization (`POST /sync`)
-Triggers federation of `PENDING` edge memories to the cloud while keeping `LOCAL_ONLY` memories quarantined locally. Detects version conflicts.
+## Swapping in Qdrant Edge
+`MemoryStore` is the only class that touches the storage engine (~12 methods). Qdrant Edge
+(`pip install qdrant-edge-py`, Python 3.11+) uses a different API: `EdgeShard.create/load`,
+`shard.update(UpdateOperation.upsert_points([Point(...)]))`, `shard.retrieve(...)`,
+`shard.query(QueryRequest(query=Query.Nearest(vec, using=...), filter=..., limit=...))`.
+Write `EdgeMemoryStore` with the same methods, then pass it to `build()`. Verify against the
+docs first: scroll, set-payload and prefetch/fusion signatures (docs: qdrant.tech/documentation/edge/).
 
-```
-Bash
-
-curl -X POST "http://127.0.0.1:8000/sync"
-```
-### 3. Upload Document (`POST /upload`)
-Ingests `.pdf` or `.txt` files, extracts text, applies GLiNER zero-shot privacy scans, and generates Hybrid (Dense + Sparse) embeddings in the Edge DB.
-```
-Bash
-
-curl -X POST "http://127.0.0.1:8000/upload" -F "file=@manual.pdf"
-
-```
-
-### 4. Query Memory & Chat (`POST /chat`)
-Triggers hybrid recall, cross-encoder re-ranking, and local Llama 3.1 inference.
-
-```
-Bash
-
-curl -X POST "http://127.0.0.1:8000/chat" \
-  -H "Content-Type: application/json" \
-  -d "{\"query\": \"What is the frontend architecture built with?\"}"
-```
-
----
-## 🚀 Future Roadmap
-* **Hardware Auto-Tuning**: Dynamic model quantization fallback based on available VRAM.
-
-* **Multi-Modal Memory**: Expanding Qdrant storage to accept image embeddings.
-
-* **Multi-Device Mesh:** Peer-to-peer syncing for distributed edge nodes in zero-connectivity zones.
-
----
-
-## 🛠️ Troubleshooting Guide
-
-* **`Ollama execution error`**
-  Ensure the Ollama application is running on your machine and you have pulled the model using `ollama pull llama3.1`.
-* **`ValueError: Dense vector is not found`**
-  Your local vector schema is outdated. Delete the `backend/qdrant_edge` directory to clear old database formats, then restart the server.
-* **Server crashes on startup (Missing Imports)**
-  Ensure your virtual environment is actively running (`venv\Scripts\activate`) and all packages are installed via `pip install -r requirements.txt`.
+## Known limitations
+* Not run against the real GLiNER / fastembed / FlashRank / Ollama in CI - tests use fakes.
+* Cloud check-then-write is not atomic; two devices pushing the same id at the same instant can race.
+* `lww` uses wall clocks; skewed device clocks can pick the "wrong" winner.
+* Tombstones keep their vectors; a retracted memory may already exist on other devices.
+* Scanned PDFs need OCR (not included).

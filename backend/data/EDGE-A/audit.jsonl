@@ -1,0 +1,2 @@
+{"data":{"device":"EDGE-A","llm":"llama3.2:3b"},"hash":"aca8cb418a308c6d1529356ce54a208f5d4eb90a96eac699010e027ea33d9d7f","prev":"0000000000000000000000000000000000000000000000000000000000000000","seq":1,"ts":1790765918.556,"type":"boot"}
+{"data":{"forced":false,"online":true},"hash":"f288f15910a887c74329f53bf2cfa79559d857224f39a1af460ffa59a59ba9b7","prev":"aca8cb418a308c6d1529356ce54a208f5d4eb90a96eac699010e027ea33d9d7f","seq":2,"ts":1790765918.572,"type":"network"}

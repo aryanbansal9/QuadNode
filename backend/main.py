@@ -1,205 +1,298 @@
-import sys
-import os
-import uuid
-import time
-import hashlib
+"""HTTP API. Run:  python -m uvicorn backend.main:app --port 8000   (no --reload:
+embedded Qdrant holds a file lock and reload would spawn a second process)."""
+from __future__ import annotations
+
+import asyncio
+import io
+import json
 import logging
-from pathlib import Path
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from fastembed import TextEmbedding
-from qdrant_client import QdrantClient
-from qdrant_client.models import Filter, FieldCondition, MatchValue, PointStruct, VectorParams, Distance
-import ollama
-from flashrank import Ranker
-from gliner import GLiNER
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi.concurrency import run_in_threadpool
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
-BASE_DIR = Path(__file__).resolve().parent
-LOG_PATH = BASE_DIR / "audit.log"
+from . import models as M
+from .container import Container, build
+from .privacy import PrivacyGuard
+from .service import Invalid, NotFound
+from .sync import ConflictError, Offline
 
-logging.basicConfig(
-    filename=str(LOG_PATH), level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
+log = logging.getLogger("quadnode")
 
-app = FastAPI(title="QuadNode Apex Edge Intelligence")
 
-# 1. Initialize Neural Models
-print("Booting QuadNode Apex Architecture...")
-dense_model = TextEmbedding("nomic-ai/nomic-embed-text-v1.5")
-reranker = Ranker(model_name="ms-marco-MiniLM-L-12-v2", cache_dir=str(BASE_DIR / "qdrant_storage"))
-ner_model = GLiNER.from_pretrained("urchade/gliner_mediumv2.1")
-SENSITIVE_LABELS = ["API Key", "Password", "Secret", "Token", "Credential", "PII"]
+class IngestIn(BaseModel):
+    text: str = Field(min_length=1)
+    source: str | None = None
 
-# 2. Dual-Database Architecture (Edge vs Cloud Simulation)
-EDGE_DB_PATH = str(BASE_DIR / "qdrant_edge")
-CLOUD_DB_PATH = str(BASE_DIR / "qdrant_cloud_sim")
-COLLECTION_NAME = "quadnode_memory"
 
-os.makedirs(EDGE_DB_PATH, exist_ok=True)
-os.makedirs(CLOUD_DB_PATH, exist_ok=True)
+class UpdateIn(BaseModel):
+    text: str = Field(min_length=1)
 
-edge_db = QdrantClient(path=EDGE_DB_PATH)
-cloud_db = QdrantClient(path=CLOUD_DB_PATH) # Simulates central server for hackathon demo
 
-SEMANTIC_CACHE = {}
+class QueryIn(BaseModel):
+    query: str = Field(min_length=1)
+    k: int = Field(5, ge=1, le=20)
 
-class ChatRequest(BaseModel):
-    query: str
 
-class IngestRequest(BaseModel):
-    text: str
-    source: str = "manual_entry"
+class NetworkIn(BaseModel):
+    online: bool
 
-class RerankPayload:
-    def __init__(self, query, passages):
-        self.query = query
-        self.passages = passages
 
-def log_audit(event_type: str, details: str):
-    proof_hash = hashlib.sha256(f"{time.time()}-{event_type}-{details}".encode()).hexdigest()
-    logging.info(f"EVENT: {event_type} | DETAILS: {details} | HASH: {proof_hash}")
+class ResolveIn(BaseModel):
+    strategy: str   # keep_local | keep_remote | keep_both
 
-@app.on_event("startup")
-async def startup_event():
-    for db in [edge_db, cloud_db]:
-        if not db.collection_exists(COLLECTION_NAME):
-            db.create_collection(
-                collection_name=COLLECTION_NAME,
-                vectors_config=VectorParams(size=256, distance=Distance.COSINE)
-            )
-    print("Edge Database, Cloud Server (Simulated), & AI Pipeline Online.")
 
-@app.get("/status")
-def system_status():
-    """Provides live telemetry for the React Frontend Dashboard."""
-    edge_count = edge_db.count(collection_name=COLLECTION_NAME).count
-    cloud_count = cloud_db.count(collection_name=COLLECTION_NAME).count
-    
-    pending = edge_db.count(collection_name=COLLECTION_NAME, count_filter=Filter(
-        must=[FieldCondition(key="sync_status", match=MatchValue(value="PENDING"))]
-    )).count
-    
-    local_only = edge_db.count(collection_name=COLLECTION_NAME, count_filter=Filter(
-        must=[FieldCondition(key="sync_status", match=MatchValue(value="LOCAL_ONLY"))]
-    )).count
+def _view(rec, full: bool = True) -> dict:
+    p = dict(rec.payload)
+    if not full:
+        p["text"] = p.get("text", "")[:200]
+    return {"id": rec.id, **p}
 
-    return {
-        "status": "ONLINE",
-        "edge_memories": edge_count,
-        "cloud_memories": cloud_count,
-        "pending_sync": pending,
-        "local_only_secured": local_only,
-        "cache_size": len(SEMANTIC_CACHE)
-    }
 
-@app.post("/ingest")
-def ingest_memory(req: IngestRequest):
-    """Creates local memory with rich metadata and Edge-to-Cloud routing logic."""
-    print(f"\n[+] Ingesting: Scanning for privacy risks...")
-    
-    # Zero-Shot Privacy Guardrail
-    entities = ner_model.predict_entities(req.text, SENSITIVE_LABELS)
-    sync_status = "LOCAL_ONLY" if entities else "PENDING"
-    
-    optimized_dense = list(dense_model.embed([req.text]))[0][:256].tolist()
-    point_id = str(uuid.uuid4())
-    
-    payload = {
-        "text": req.text,
-        "source": req.source,
-        "sync_status": sync_status,
-        "timestamp": time.time()
-    }
-    
-    edge_db.upsert(
-        collection_name=COLLECTION_NAME,
-        points=[PointStruct(id=point_id, vector=optimized_dense, payload=payload)]
-    )
-    
-    log_audit("INGESTION", f"ID: {point_id} | Status: {sync_status}")
-    print(f"[+] Memory Committed. State: {sync_status}")
-    return {"status": "success", "id": point_id, "sync_state": sync_status}
+def create_app(factory=build) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        c: Container = await run_in_threadpool(factory)
+        app.state.c = c
+        loop = asyncio.get_running_loop()
+        app.state.wake = asyncio.Event()
+        app.state.loop = loop
+        task = asyncio.create_task(_sync_loop(app))
+        c.audit.record("boot", device=c.cfg.device_id, llm=getattr(c.llm, "model", None))
+        yield
+        task.cancel()
 
-@app.post("/sync")
-def synchronize_edge_to_cloud():
-    """Simulates internet restoration: Pushes PENDING data to Cloud, locks LOCAL_ONLY."""
-    print("\n[~] Internet Connection Detected. Initiating Edge-to-Cloud Sync...")
-    
-    pending_points = edge_db.scroll(
-        collection_name=COLLECTION_NAME,
-        scroll_filter=Filter(must=[FieldCondition(key="sync_status", match=MatchValue(value="PENDING"))]),
-        limit=100,
-        with_payload=True,
-        with_vectors=True
-    )[0]
-    
-    if not pending_points:
-        return {"status": "success", "synced_count": 0, "message": "All edge data is fully synchronized."}
-    
-    synced_ids = []
-    for point in pending_points:
-        # Push to Cloud DB
-        cloud_db.upsert(
-            collection_name=COLLECTION_NAME,
-            points=[PointStruct(id=point.id, vector=point.vector, payload=point.payload)]
-        )
-        
-        # Update Local Edge DB to SYNCED
-        updated_payload = point.payload.copy()
-        updated_payload["sync_status"] = "SYNCED"
-        edge_db.set_payload(collection_name=COLLECTION_NAME, payload=updated_payload, points=[point.id])
-        synced_ids.append(point.id)
-        log_audit("CLOUD_SYNC", f"Successfully federated memory ID: {point.id}")
+    async def _sync_loop(app: FastAPI):
+        """Connectivity watcher + background sync. Wakes on a timer or when the
+        network switch is flipped, so 'reconnect' triggers sync immediately."""
+        c: Container = app.state.c
+        was = None
+        while True:
+            try:
+                online = await asyncio.to_thread(c.conn.probe, False)
+                if online != was:
+                    c.audit.record("network", online=online, forced=c.conn.forced_offline)
+                    was = online
+                if online:
+                    await asyncio.to_thread(c.sync.run_once)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("sync loop error")
+            try:
+                await asyncio.wait_for(app.state.wake.wait(), timeout=c.cfg.sync_interval)
+            except asyncio.TimeoutError:
+                pass
+            app.state.wake.clear()
 
-    print(f"[~] Sync Complete. {len(synced_ids)} memories pushed to cloud.")
-    return {"status": "success", "synced_count": len(synced_ids), "synced_ids": synced_ids}
+    app = FastAPI(title="QuadNode Edge Memory", lifespan=lifespan)
+    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-@app.post("/chat")
-def chat_with_memory(req: ChatRequest):
-    """Retrieves context from Edge DB (Allows reading LOCAL_ONLY for local intelligence)."""
-    start_time = time.time()
-    query_clean = req.query.strip().lower()
-    
-    if query_clean in SEMANTIC_CACHE:
-        return {"response": SEMANTIC_CACHE[query_clean], "cache_hit": True, "time_ms": round((time.time() - start_time) * 1000, 2)}
+    def C() -> Container:
+        return app.state.c
 
-    optimized_dense = list(dense_model.embed([req.query]))[0][:256].tolist() 
-    
-    # Notice: NO FILTER. The local AI can read all data (SYNCED, PENDING, and LOCAL_ONLY).
-    results = edge_db.query_points(
-        collection_name=COLLECTION_NAME,
-        query=optimized_dense,
-        limit=10, 
-        with_payload=True
-    ).points
-    
-    if not results:
-        return {"response": "I have no memory regarding this on the edge device.", "sources": []}
-    
-    passages = [{"id": hit.id, "text": hit.payload.get('text', '')} for hit in results]
-    reranked_results = reranker.rerank(RerankPayload(query=req.query, passages=passages))
-    
-    top_k = [f"- {doc['text']} [Confidence: {doc['score']:.4f}]" for doc in reranked_results[:3] if doc['score'] > 0.05]
-    
-    if not top_k:
-        return {"response": "Context found, but confidence too low to answer securely.", "sources": []}
-        
-    system_prompt = f"You are an offline Edge AI. Use ONLY these verified local memories:\n{chr(10).join(top_k)}"
-    
-    response = ollama.chat(model='llama3.1', messages=[
-        {'role': 'system', 'content': system_prompt},
-        {'role': 'user', 'content': req.query}
-    ], options={'temperature': 0.1})
-    
-    final_answer = response['message']['content']
-    SEMANTIC_CACHE[query_clean] = final_answer
-    
-    log_audit("INFERENCE", f"Edge reasoning completed in {round((time.time() - start_time) * 1000, 2)}ms")
-    return {
-        "response": final_answer, 
-        "sources": top_k,
-        "cache_hit": False,
-        "time_ms": round((time.time() - start_time) * 1000, 2)
-    }
+    # ------------------------------------------------------------------ status
+    @app.get("/health")
+    def health():
+        return {"ok": True}
+
+    @app.get("/status")
+    def status():
+        c = C()
+        online = c.conn.probe()
+        try:
+            cloud_n = c.cloud.count(None) if online else None
+        except Exception:
+            cloud_n = None
+        return {"device_id": c.cfg.device_id, "online": online, "forced_offline": c.conn.forced_offline,
+                "edge": c.memory.counts(), "cloud_memories": cloud_n,
+                "conflict_policy": c.cfg.conflict_policy, "llm_model": getattr(c.llm, "model", None),
+                "last_sync_at": c.sync.state.get("last_sync_at"), "last_sync": c.sync.state.get("last_report"),
+                "audit": {"entries": c.audit._seq}}
+
+    # ------------------------------------------------------------------ ingest
+    @app.post("/ingest")
+    def ingest(body: IngestIn):
+        try:
+            return C().memory.ingest_text(body.text, body.source)
+        except Invalid as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/upload")
+    async def upload(file: UploadFile = File(...)):
+        c = C()
+        data = await file.read()
+        if len(data) > c.cfg.max_upload_mb * 1024 * 1024:
+            raise HTTPException(413, "File too large")
+        name = file.filename or "upload"
+
+        def work():
+            if name.lower().endswith(".pdf"):
+                from pypdf import PdfReader
+                pages = [(i + 1, (p.extract_text() or "")) for i, p in enumerate(PdfReader(io.BytesIO(data)).pages)]
+            else:
+                pages = [(None, data.decode("utf-8", errors="replace"))]
+            return c.memory.ingest_segments(name, [(pg, t) for pg, t in pages if t.strip()])
+
+        try:
+            return await run_in_threadpool(work)
+        except Invalid as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/privacy/preview")
+    def privacy_preview(body: IngestIn):
+        v = C().privacy.scan(body.text)
+        return {"sensitive": v.sensitive, "labels": v.labels, "redacted": PrivacyGuard.redact(body.text)}
+
+    # ---------------------------------------------------------- search & chat
+    @app.post("/search")
+    def search(body: QueryIn):
+        r = C().retriever.search(body.query, top_k=body.k, explain=True)
+        return {"query": r.query, "timings_ms": r.timings_ms, "hits": [h.public() for h in r.hits]}
+
+    def _grounded(q: str):
+        c = C()
+        r = c.retriever.search(q, top_k=c.cfg.context_k, explain=False)
+        return r, [h for h in r.hits if h.confident]
+
+    def _src(h):
+        return {"id": h.id, "source": h.source, "page": h.page, "score": h.rerank_score,
+                "sync_status": h.sync_status}
+
+    NO_MEM = "I don't have anything relevant in memory for that."
+
+    @app.post("/chat")
+    def chat(body: QueryIn):
+        c = C()
+        r, usable = _grounded(body.query)
+        if not usable:                                    # never let the LLM improvise
+            return {"answer": NO_MEM, "grounded": False, "sources": [], "timings_ms": r.timings_ms}
+        try:
+            import time
+            t0 = time.perf_counter()
+            ans = c.llm.answer(body.query, usable)
+            r.timings_ms["llm"] = round((time.perf_counter() - t0) * 1000, 1)
+            return {"answer": ans, "grounded": True, "sources": [_src(h) for h in usable], "timings_ms": r.timings_ms}
+        except Exception as e:
+            log.exception("LLM failure")
+            return {"answer": None, "grounded": True, "llm_error": f"{type(e).__name__}",
+                    "sources": [_src(h) for h in usable], "timings_ms": r.timings_ms}
+
+    @app.post("/chat/stream")
+    def chat_stream(body: QueryIn):
+        c = C()
+        r, usable = _grounded(body.query)
+
+        def gen():
+            yield f"event: sources\ndata: {json.dumps([_src(h) for h in usable])}\n\n"
+            if not usable:
+                yield f"event: token\ndata: {json.dumps(NO_MEM)}\n\n"
+            else:
+                try:
+                    for tok in c.llm.stream(body.query, usable):
+                        yield f"event: token\ndata: {json.dumps(tok)}\n\n"
+                except Exception as e:
+                    yield f"event: error\ndata: {json.dumps(type(e).__name__)}\n\n"
+            yield f"event: done\ndata: {json.dumps(r.timings_ms)}\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    # --------------------------------------------------------------- memories
+    @app.get("/memories")
+    def memories(status: str | None = Query(None), source: str | None = None, include_deleted: bool = False,
+                 limit: int = Query(50, ge=1, le=200), offset: str | None = None):
+        if status and status not in M.STATUSES:
+            raise HTTPException(422, f"status must be one of {M.STATUSES}")
+        recs, nxt = C().memory.list_memories(status, source, include_deleted, limit, offset)
+        return {"items": [_view(r, full=False) for r in recs], "next_offset": str(nxt) if nxt else None}
+
+    @app.get("/memories/{id_}")
+    def memory(id_: str):
+        r = C().edge.get(id_)
+        if not r:
+            raise HTTPException(404, "not found")
+        return _view(r)
+
+    @app.put("/memories/{id_}")
+    def update(id_: str, body: UpdateIn):
+        try:
+            return C().memory.update_memory(id_, body.text)
+        except NotFound:
+            raise HTTPException(404, "not found")
+        except Invalid as e:
+            raise HTTPException(409, str(e))
+
+    @app.delete("/memories/{id_}")
+    def delete(id_: str):
+        try:
+            return C().memory.delete_memory(id_)
+        except NotFound:
+            raise HTTPException(404, "not found")
+
+    # ------------------------------------------------------------------- sync
+    @app.post("/sync")
+    async def sync_now():
+        return (await asyncio.to_thread(C().sync.run_once)).dict()
+
+    @app.post("/network")
+    async def network(body: NetworkIn):
+        """Demo switch: simulate losing/regaining connectivity."""
+        c = C()
+        c.conn.set_forced_offline(not body.online)
+        c.audit.record("network", online=body.online, forced=not body.online)
+        app.state.wake.set()
+        return {"online": await asyncio.to_thread(c.conn.probe, False), "forced_offline": c.conn.forced_offline}
+
+    @app.get("/conflicts")
+    def conflicts():
+        return {"items": [_view(r) for r in C().edge.all(M_status(M.CONFLICT))]}
+
+    @app.post("/conflicts/{id_}/resolve")
+    async def resolve(id_: str, body: ResolveIn):
+        try:
+            return await asyncio.to_thread(C().sync.resolve, id_, body.strategy)
+        except Offline as e:
+            raise HTTPException(503, str(e))
+        except ConflictError as e:
+            raise HTTPException(409, str(e))
+
+    # -------------------------------------------------------- activity & audit
+    @app.get("/activity")
+    def activity(limit: int = Query(100, ge=1, le=500), types: str | None = None):
+        return {"items": C().audit.recent(limit, set(types.split(",")) if types else None)}
+
+    @app.get("/audit/verify")
+    def audit_verify():
+        return C().audit.verify()
+
+    @app.get("/events")
+    async def events():
+        c = C()
+        q = c.audit.subscribe(asyncio.get_running_loop())
+
+        async def gen():
+            try:
+                yield "retry: 2000\n\n"
+                while True:
+                    try:
+                        e = await asyncio.wait_for(q.get(), timeout=15)
+                        yield f"data: {json.dumps(e)}\n\n"
+                    except asyncio.TimeoutError:
+                        yield ": keepalive\n\n"
+            finally:
+                c.audit.unsubscribe(q)
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    return app
+
+
+def M_status(s):
+    from .store import f_status
+    return f_status(s)
+
+
+app = create_app()
