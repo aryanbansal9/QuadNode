@@ -48,6 +48,7 @@ By unifying **zero-shot privacy guardrails**, **hybrid vector search**, **cross-
 | :--- | :--- | :--- |
 | **Vector Storage** | **Qdrant** | High-speed dual databases (`qdrant_edge/` and `qdrant_cloud_sim/`). |
 | **Dense Embedding** | **FastEmbed** | Lightweight, high-accuracy semantic vector representations (`nomic-embed-text-v1.5`). |
+| **Sparse Embedding** | **SPLADE** | Exact keyword BM25 sparse representations for hybrid retrieval (`Splade_PP_en_v1`). |
 | **Re-Ranking** | **FlashRank** | Cross-encoder precision scoring that eliminates context noise (`ms-marco-MiniLM-L-12-v2`). |
 | **Privacy Filter** | **GLiNER** | Zero-shot Named Entity Recognition to quarantine sensitive tokens. |
 | **LLM Inference** | **Ollama** | Offline, privacy-first local LLM execution (`llama3.1`). |
@@ -113,79 +114,42 @@ Bash
 
 python -m uvicorn backend.main:app --reload
 ```
+---
 ## 🔌 API Reference & Usage
-1. System Telemetry (`GET /status`)
+### 1. System Telemetry (`GET /status`)
 Returns live metrics on edge memories, cloud synchronization queues, and local privacy quarantines.
-```bash
-curl [http://127.0.0.1:8000/status](http://127.0.0.1:8000/status)
+``` 
+Bash
+
+curl http://127.0.0.1:8000/status
 ```
 
-Endpoint: http://127.0.0.1:8000/ingest
+### 2. Edge-to-Cloud Synchronization (`POST /sync`)
+Triggers federation of `PENDING` edge memories to the cloud while keeping `LOCAL_ONLY` memories quarantined locally. Detects version conflicts.
 
-Request Payload:
-```
-JSON
-
-{
-  "text": "The frontend architecture for QuadNode is exclusively built using Tauri and React."
-}
-```
-
-cURL Execution:
 ```
 Bash
 
-curl -X POST "[http://127.0.0.1:8000/ingest](http://127.0.0.1:8000/ingest)" \
-  -H "Content-Type: application/json" \
-  -d "{\"text\": \"The frontend architecture for QuadNode is exclusively built using Tauri and React.\"}"
-  ```
-
-Response:
+curl -X POST "http://127.0.0.1:8000/sync"
 ```
-JSON
-
-{
-  "status": "success",
-  "privacy_flagged": false,
-  "id": "8f1882c6-5ccb-4555-b019-c589652acaf0",
-  "execution_time_ms": 882.52
-}
-```
-
-2. Query Memory & Chat (POST /chat)
-Triggers recall, cross-encoder re-ranking, confidence threshold checks, and local Llama 3.1 inference.
-
-Endpoint: http://127.0.0.1:8000/chat
-
-Request Payload:
-```
-JSON
-
-{
-  "query": "What is the frontend architecture built with?"
-}
-```
-cURL Execution:
+### 3. Upload Document (`POST /upload`)
+Ingests `.pdf` or `.txt` files, extracts text, applies GLiNER zero-shot privacy scans, and generates Hybrid (Dense + Sparse) embeddings in the Edge DB.
 ```
 Bash
 
-curl -X POST "[http://127.0.0.1:8000/sync](http://127.0.0.1:8000/sync)" \
+curl -X POST "http://127.0.0.1:8000/upload" -F "file=@manual.pdf"
+
+```
+
+### 4. Query Memory & Chat (`POST /chat`)
+Triggers hybrid recall, cross-encoder re-ranking, and local Llama 3.1 inference.
+
+```
+Bash
+
+curl -X POST "http://127.0.0.1:8000/chat" \
   -H "Content-Type: application/json" \
   -d "{\"query\": \"What is the frontend architecture built with?\"}"
-  ```
-Response:
-```
-JSON
-
-{
-  "query": "What is the frontend architecture built with?",
-  "response": "The frontend architecture for QuadNode is exclusively built using Tauri and React.",
-  "sources": [
-    "- The frontend architecture is exclusively built using Tauri and React. [Confidence: 0.9998]"
-  ],
-  "cache_hit": false,
-  "execution_time_ms": 1134.49
-}
 ```
 
 ---
@@ -197,11 +161,12 @@ JSON
 * **Multi-Device Mesh:** Peer-to-peer syncing for distributed edge nodes in zero-connectivity zones.
 
 ---
+
 ## 🛠️ Troubleshooting Guide
 
 * **`Ollama execution error`**
   Ensure the Ollama application is running on your machine and you have pulled the model using `ollama pull llama3.1`.
 * **`ValueError: Dense vector is not found`**
-  Your local vector schema is outdated. Delete the `backend/qdrant_storage` directory to clear old database formats, then restart the server.
+  Your local vector schema is outdated. Delete the `backend/qdrant_edge` directory to clear old database formats, then restart the server.
 * **Server crashes on startup (Missing Imports)**
   Ensure your virtual environment is actively running (`venv\Scripts\activate`) and all packages are installed via `pip install -r requirements.txt`.
