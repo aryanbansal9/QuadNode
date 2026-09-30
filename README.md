@@ -2,6 +2,13 @@
 
 Offline-first edge memory platform featuring per-chunk privacy gating, Reciprocal Rank Fusion (RRF) hybrid retrieval, local Llama 3.1 inference, and deterministic 3-way edge-to-cloud synchronization with conflict handling.
 
+## ✨ Core Features
+* **Dual-Engine Hybrid Retrieval:** Combines Nomic dense embeddings with BM25 sparse search via Reciprocal Rank Fusion (RRF) to capture both semantic intent and exact technical part numbers.
+* **Fail-Closed Privacy Gate:** GLiNER zero-shot PII filter flags sensitive credentials and tags chunks as `LOCAL_ONLY`, physically blocking them from outbound cloud queues.
+* **HMAC Hash-Chained Audit Trail:** Every memory modification links to the previous hash, enabling automated tamper checks via the `/audit/verify` endpoint.
+* **Hardware Auto-Tuning:** Automatically detects available GPU VRAM at startup to scale between Llama 3.1 8B and 3.2 3B models.
+* **Matryoshka Vector Truncation:** Compresses 768-dimensional embeddings to 256 dimensions, slashing edge storage and RAM usage by 66% while preserving accuracy.
+
 ---
 ## 📂 Project Layout
 ```
@@ -29,47 +36,36 @@ pip install -r requirements.txt
 ```
 
 ### 2. Pull Local Models (Ollama)
-```
-Bash
-
+```bash
 ollama pull llama3.1:latest    # (or llama3.2:3b for CPU-only nodes)
 ```
 
 ### 3. Run the Backend Server
 Note: Do not use `--reload` because the embedded Qdrant database maintains a strict file lock.
-```
-Bash
-
+```bash
 python -m uvicorn backend.main:app --port 8000
 ```
 Open your browser at http://127.0.0.1:8000/docs to view the interactive Swagger API documentation.
 
-## 4. Run the Automated Test Suite
-```
-Bash
-
+### 4. Run the Automated Test Suite
+```bash
 pytest -q
 ```
 ---
 ## 🌐 Multi-Device & Cloud Demo Setup
 To demonstrate real distributed edge-to-cloud synchronization with intermittent connectivity:
 ### 1. Spin up a local Qdrant Cloud server via Docker:
-```
-Bash
+```bash
 docker run -p 6333:6333 qdrant/qdrant
 ```
 ### 2. Launch Edge Node A (Terminal 1):
-```
-Bash
-
+```bash
 set QN_CLOUD_URL=http://localhost:6333
 set QN_DEVICE_ID=EDGE-A
 python -m uvicorn backend.main:app --port 8000
 ```
 ### 3. Launch Edge Node B (Terminal 2):
-```
-Bash
-
+```bash
 set QN_CLOUD_URL=http://localhost:6333
 set QN_DEVICE_ID=EDGE-B
 python -m uvicorn backend.main:app --port 8001
@@ -104,6 +100,9 @@ The system evaluates state changes using a 3-way version tracker (`version` vs `
 ---
  
 ## 🛡️ Known Limitations & Future Roadmap
+
+* **Native Edge Storage:** Currently utilizing embedded `qdrant-client` for offline vector storage. Future roadmap includes swapping the storage engine to `qdrant-edge-py` (Rust-based Edge Shards) for optimized performance on constrained devices.
+
 * **Scanned PDFs:** Require external OCR integration.
+
 * **Clock Skew:** Last-Writer-Wins (`lww`) conflict resolution relies on system wall clocks.
-* **Hardware Auto-Tuning:** Automatically detects available GPU VRAM at startup to scale between 8B and 3B models.
