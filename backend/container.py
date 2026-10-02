@@ -1,8 +1,12 @@
-"""Wires everything together. All heavy parts are injectable so tests (and a
-future Qdrant-Edge store) can replace them."""
+"""Wires everything together. Strictly locked to 'quadnode_memory' collection."""
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass
+from dotenv import load_dotenv
+
+load_dotenv()  # Ensure environment variables are loaded
 
 from qdrant_client import QdrantClient
 
@@ -12,6 +16,8 @@ from .retrieval import Retriever
 from .service import MemoryService
 from .store import MemoryStore
 from .sync import Connectivity, SyncEngine
+
+log = logging.getLogger("quadnode.container")
 
 
 @dataclass
@@ -50,18 +56,36 @@ def build(cfg: Config | None = None, *, embedder=None, reranker=None, privacy=No
         from .llm import LLM
         llm = LLM(cfg)
 
-    # EDGE: embedded, in-process, on disk. (Swap point for a Qdrant Edge EdgeShard adapter.)
-    edge_client = edge_client or QdrantClient(path=str(cfg.edge_path))
-    remote = bool(cfg.cloud_url)
-    if cloud_client is None:
-        cloud_client = (QdrantClient(url=cfg.cloud_url, api_key=cfg.cloud_api_key, timeout=cfg.cloud_timeout)
-                        if remote else QdrantClient(path=str(cfg.cloud_local_path)))
+    # =================================================================
+    # FORCE THE EXACT COLLECTION NAME FOR BOTH LOCAL AND CLOUD
+    TARGET_COLLECTION = "quadnode_memory"
+    # =================================================================
 
-    edge = MemoryStore(edge_client, cfg.collection, cfg.embed_dim, "edge")
-    cloud = MemoryStore(cloud_client, cfg.collection, cfg.embed_dim, "cloud", remote=remote)
+    # EDGE: Embedded local vector storage on disk
+    edge_client = edge_client or QdrantClient(path=str(cfg.edge_path))
+    
+    # CLOUD: Fetch explicitly from env
+    cloud_url = os.getenv("QDRANT_URL") or cfg.cloud_url
+    cloud_key = os.getenv("QDRANT_API_KEY") or cfg.cloud_api_key
+
+    if cloud_client is None:
+        log.info(f"Connecting to Qdrant Cloud Cluster -> URL: {cloud_url}")
+        cloud_client = QdrantClient(
+            url=cloud_url,
+            api_key=cloud_key,
+            timeout=cfg.cloud_timeout
+        )
+
+    # Initialize stores with the locked TARGET_COLLECTION
+    edge = MemoryStore(edge_client, TARGET_COLLECTION, cfg.embed_dim, "edge", remote=False)
+    cloud = MemoryStore(cloud_client, TARGET_COLLECTION, cfg.embed_dim, "cloud", remote=True)
+    
+    # Ensure collections exist
     edge.ensure()
-    if not remote:
-        cloud.ensure()           # simulator lives on local disk; a real server is ensured on first sync
+    try:
+        cloud.ensure()
+    except Exception as e:
+        log.warning(f"Cloud collection verify skipped (offline): {e}")
 
     conn = Connectivity(cloud)
     return Container(cfg, audit, edge, cloud, embedder, privacy, reranker,

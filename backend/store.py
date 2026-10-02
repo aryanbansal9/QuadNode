@@ -1,10 +1,4 @@
-"""Thread-safe wrapper over one Qdrant collection.
-
-Used for BOTH sides: the edge store and the cloud store. The sync engine and
-services only talk to this class, so the storage engine is swappable:
-  * today   : qdrant-client (embedded local mode for edge, HTTP for the server)
-  * next    : a Qdrant Edge `EdgeShard` adapter implementing the same ~12 methods
-              (see README, "Swapping in Qdrant Edge")."""
+"""Thread-safe wrapper over one Qdrant collection (Edge or Cloud)."""
 from __future__ import annotations
 
 import threading
@@ -46,7 +40,6 @@ class MemoryStore:
         self.client, self.collection, self.dim, self.name, self.remote = client, collection, dim, name, remote
         self._lock = threading.RLock()
 
-    # ---- lifecycle ------------------------------------------------------
     def ensure(self) -> None:
         with self._lock:
             if not self.client.collection_exists(self.collection):
@@ -55,7 +48,7 @@ class MemoryStore:
                     vectors_config={"dense": models.VectorParams(size=self.dim, distance=models.Distance.COSINE)},
                     sparse_vectors_config={"sparse": models.SparseVectorParams(modifier=models.Modifier.IDF)},
                 )
-            if self.remote:                       # payload indexes are a no-op in embedded mode
+            if self.remote:
                 for key, schema in (("sync_status", "keyword"), ("source", "keyword"),
                                     ("sensitivity", "keyword"), ("deleted", "bool"),
                                     ("updated_at", "float")):
@@ -71,11 +64,18 @@ class MemoryStore:
         except Exception:
             return False
 
-    # ---- writes ---------------------------------------------------------
     def upsert(self, id_: str, vector: dict, payload: dict) -> None:
-        vec = {"dense": list(vector["dense"]), "sparse": _sparse(vector["sparse"])}
+        vec_payload = {}
+        if vector and "dense" in vector:
+            vec_payload["dense"] = list(vector["dense"])
+        if vector and "sparse" in vector and vector["sparse"]:
+            vec_payload["sparse"] = _sparse(vector["sparse"])
+            
         with self._lock:
-            self.client.upsert(self.collection, points=[models.PointStruct(id=id_, vector=vec, payload=payload)])
+            self.client.upsert(
+                self.collection, 
+                points=[models.PointStruct(id=id_, vector=vec_payload if vec_payload else None, payload=payload)]
+            )
 
     def set_payload(self, id_: str, patch: dict) -> None:
         with self._lock:
@@ -86,7 +86,6 @@ class MemoryStore:
             with self._lock:
                 self.client.delete(self.collection, points_selector=models.PointIdsList(points=ids))
 
-    # ---- reads ----------------------------------------------------------
     def get_many(self, ids: list[str], vectors: bool = False) -> dict[str, Record]:
         if not ids:
             return {}
@@ -105,8 +104,6 @@ class MemoryStore:
         return [Record(str(p.id), p.payload or {}, p.vector if vectors else None) for p in pts], nxt
 
     def all(self, flt: models.Filter | None = None) -> list[Record]:
-        """Every matching record (payload only). Collected first so callers can
-        mutate payloads while iterating without disturbing pagination."""
         out, off = [], None
         while True:
             recs, off = self.scroll(flt, limit=256, offset=off)
@@ -123,7 +120,6 @@ class MemoryStore:
 
     def query_hybrid(self, dense: list[float], sparse: SparseVec, flt: models.Filter,
                      prefetch_limit: int, limit: int):
-        """Server-side hybrid: dense + sparse branches fused with Reciprocal Rank Fusion."""
         with self._lock:
             return self.client.query_points(
                 self.collection,
@@ -136,7 +132,6 @@ class MemoryStore:
             ).points
 
     def query_branch(self, name: str, query, flt: models.Filter, limit: int):
-        """Single branch ('dense' or 'sparse'); used to explain *why* a hit was found."""
         q = _sparse(query) if name == "sparse" else query
         with self._lock:
             return self.client.query_points(self.collection, query=q, using=name, query_filter=flt,

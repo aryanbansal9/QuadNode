@@ -1,14 +1,24 @@
-"""HTTP API. Run:  python -m uvicorn backend.main:app --port 8000   (no --reload:
-embedded Qdrant holds a file lock and reload would spawn a second process)."""
+"""HTTP API for QuadNode Edge Memory Engine.
+
+Run: python -m uvicorn backend.main:app --port 8000
+Note: Embedded Qdrant maintains an exclusive write lock on storage.
+Do not use '--reload' in production or multi-worker mode.
+"""
+
 from __future__ import annotations
 
 import asyncio
 import io
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
+from typing import Literal
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from dotenv import load_dotenv
+load_dotenv()
+
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -22,18 +32,19 @@ from .sync import ConflictError, Offline
 
 log = logging.getLogger("quadnode")
 
+# ------------------------------------------------------------------ SCHEMAS
 
 class IngestIn(BaseModel):
-    text: str = Field(min_length=1)
-    source: str | None = None
+    text: str = Field(..., min_length=1, description="Raw text memory content")
+    source: str | None = Field(None, description="Optional document source identifier")
 
 
 class UpdateIn(BaseModel):
-    text: str = Field(min_length=1)
+    text: str = Field(..., min_length=1, description="Updated text memory content")
 
 
 class QueryIn(BaseModel):
-    query: str = Field(min_length=1)
+    query: str = Field(..., min_length=1)
     k: int = Field(5, ge=1, le=20)
 
 
@@ -42,257 +53,395 @@ class NetworkIn(BaseModel):
 
 
 class ResolveIn(BaseModel):
-    strategy: str   # keep_local | keep_remote | keep_both
+    strategy: Literal["keep_local", "keep_remote", "keep_both"]
 
+
+# ------------------------------------------------------------------ HELPERS
 
 def _view(rec, full: bool = True) -> dict:
     p = dict(rec.payload)
-    if not full:
-        p["text"] = p.get("text", "")[:200]
+    if not full and "text" in p:
+        p["text"] = p["text"][:200]
     return {"id": rec.id, **p}
 
+
+async def _read_upload_stream(file: UploadFile, max_bytes: int) -> bytes:
+    """Reads uploaded files in 1MB chunks to prevent memory exhaustion attacks."""
+    size = 0
+    chunks = []
+    while chunk := await file.read(1024 * 1024):
+        size += len(chunk)
+        if size > max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"File exceeds maximum allowed size of {max_bytes // (1024 * 1024)}MB"
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+# ------------------------------------------------------------------ APPLICATION
 
 def create_app(factory=build) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         c: Container = await run_in_threadpool(factory)
         app.state.c = c
-        loop = asyncio.get_running_loop()
+        app.state.sync_lock = asyncio.Lock()  # Protects embedded store from concurrent write operations
         app.state.wake = asyncio.Event()
-        app.state.loop = loop
+        app.state.loop = asyncio.get_running_loop()
+        
         task = asyncio.create_task(_sync_loop(app))
         c.audit.record("boot", device=c.cfg.device_id, llm=getattr(c.llm, "model", None))
+        
         yield
+        
         task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     async def _sync_loop(app: FastAPI):
-        """Connectivity watcher + background sync. Wakes on a timer or when the
-        network switch is flipped, so 'reconnect' triggers sync immediately."""
+        """Monitors network state and triggers auto-sync when online."""
         c: Container = app.state.c
-        was = None
+        was_online = None
         while True:
             try:
                 online = await asyncio.to_thread(c.conn.probe, False)
-                if online != was:
+                if online != was_online:
                     c.audit.record("network", online=online, forced=c.conn.forced_offline)
-                    was = online
-                if online:
-                    await asyncio.to_thread(c.sync.run_once)
+                    was_online = online
+                
+                if online and not app.state.sync_lock.locked():
+                    async with app.state.sync_lock:
+                        await asyncio.to_thread(c.sync.run_once)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                log.exception("sync loop error")
+                log.exception("Error inside background sync loop")
+
             try:
                 await asyncio.wait_for(app.state.wake.wait(), timeout=c.cfg.sync_interval)
             except asyncio.TimeoutError:
                 pass
             app.state.wake.clear()
 
-    app = FastAPI(title="QuadNode Edge Memory", lifespan=lifespan)
-    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+    app = FastAPI(
+        title="QuadNode Edge Memory Engine",
+        version="2.0.0",
+        description="Offline-First Vector RAG & Synchronization Platform",
+        lifespan=lifespan
+    )
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:3000", "http://localhost:5173", "tauri://localhost"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     def C() -> Container:
         return app.state.c
 
-    # ------------------------------------------------------------------ status
+    # -------------------------------------------------------------- STATUS
+
     @app.get("/health")
     def health():
-        return {"ok": True}
+        return {"status": "healthy", "timestamp": time.time()}
 
     @app.get("/status")
-    def status():
+    def get_status():
         c = C()
         online = c.conn.probe()
-        try:
-            cloud_n = c.cloud.count(None) if online else None
-        except Exception:
-            cloud_n = None
-        return {"device_id": c.cfg.device_id, "online": online, "forced_offline": c.conn.forced_offline,
-                "edge": c.memory.counts(), "cloud_memories": cloud_n,
-                "conflict_policy": c.cfg.conflict_policy, "llm_model": getattr(c.llm, "model", None),
-                "last_sync_at": c.sync.state.get("last_sync_at"), "last_sync": c.sync.state.get("last_report"),
-                "audit": {"entries": c.audit._seq}}
+        cloud_n = None
+        if online:
+            try:
+                cloud_n = c.cloud.count(None)
+            except Exception:
+                cloud_n = None
 
-    # ------------------------------------------------------------------ ingest
-    @app.post("/ingest")
-    def ingest(body: IngestIn):
-        try:
-            return C().memory.ingest_text(body.text, body.source)
-        except Invalid as e:
-            raise HTTPException(422, str(e))
+        return {
+            "device_id": c.cfg.device_id,
+            "online": online,
+            "forced_offline": c.conn.forced_offline,
+            "edge": c.memory.counts(),
+            "cloud_memories": cloud_n,
+            "conflict_policy": c.cfg.conflict_policy,
+            "llm_model": getattr(c.llm, "model", "Llama3-8B-Local"),
+            "last_sync_at": c.sync.state.get("last_sync_at"),
+            "last_sync": c.sync.state.get("last_report"),
+            "audit": {"sequence": c.audit._seq}
+        }
+
+    # -------------------------------------------------------------- INGESTION
+
+    @app.post("/ingest", status_code=status.HTTP_201_CREATED)
+    async def ingest(body: IngestIn):
+        c = C()
+        async with app.state.sync_lock:
+            try:
+                return await run_in_threadpool(c.memory.ingest_text, body.text, body.source)
+            except Invalid as e:
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e))
 
     @app.post("/upload")
     async def upload(file: UploadFile = File(...)):
         c = C()
-        data = await file.read()
-        if len(data) > c.cfg.max_upload_mb * 1024 * 1024:
-            raise HTTPException(413, "File too large")
-        name = file.filename or "upload"
+        max_bytes = c.cfg.max_upload_mb * 1024 * 1024
+        data = await _read_upload_stream(file, max_bytes)
+        filename = file.filename or "uploaded_document"
 
-        def work():
-            if name.lower().endswith(".pdf"):
+        def process_file():
+            if filename.lower().endswith(".pdf"):
                 from pypdf import PdfReader
-                pages = [(i + 1, (p.extract_text() or "")) for i, p in enumerate(PdfReader(io.BytesIO(data)).pages)]
+                reader = PdfReader(io.BytesIO(data))
+                extracted_pages = []
+                for idx, page in enumerate(reader.pages):
+                    text = page.extract_text() or ""
+                    if text.strip():
+                        extracted_pages.append((idx + 1, text))
+                
+                if not extracted_pages:
+                    raise Invalid("PDF contains no extractable text or is a scanned document.")
+                return c.memory.ingest_segments(filename, extracted_pages)
             else:
-                pages = [(None, data.decode("utf-8", errors="replace"))]
-            return c.memory.ingest_segments(name, [(pg, t) for pg, t in pages if t.strip()])
+                raw_text = data.decode("utf-8", errors="replace")
+                if not raw_text.strip():
+                    raise Invalid("Uploaded text file is empty.")
+                return c.memory.ingest_segments(filename, [(None, raw_text)])
 
-        try:
-            return await run_in_threadpool(work)
-        except Invalid as e:
-            raise HTTPException(422, str(e))
+        async with app.state.sync_lock:
+            try:
+                return await run_in_threadpool(process_file)
+            except Invalid as e:
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e))
 
     @app.post("/privacy/preview")
     def privacy_preview(body: IngestIn):
-        v = C().privacy.scan(body.text)
-        return {"sensitive": v.sensitive, "labels": v.labels, "redacted": PrivacyGuard.redact(body.text)}
+        scan_result = C().privacy.scan(body.text)
+        return {
+            "sensitive": scan_result.sensitive,
+            "labels": scan_result.labels,
+            "redacted": PrivacyGuard.redact(body.text)
+        }
 
-    # ---------------------------------------------------------- search & chat
+    # ------------------------------------------------------ SEARCH & CHAT
+
     @app.post("/search")
     def search(body: QueryIn):
-        r = C().retriever.search(body.query, top_k=body.k, explain=True)
-        return {"query": r.query, "timings_ms": r.timings_ms, "hits": [h.public() for h in r.hits]}
+        res = C().retriever.search(body.query, top_k=body.k, explain=True)
+        return {
+            "query": res.query,
+            "timings_ms": res.timings_ms,
+            "hits": [hit.public() for hit in res.hits]
+        }
 
-    def _grounded(q: str):
+    def _grounded_context(query: str):
         c = C()
-        r = c.retriever.search(q, top_k=c.cfg.context_k, explain=False)
-        return r, [h for h in r.hits if h.confident]
+        res = c.retriever.search(query, top_k=c.cfg.context_k, explain=False)
+        usable_hits = [h for h in res.hits if h.confident]
+        return res, usable_hits
 
-    def _src(h):
-        return {"id": h.id, "source": h.source, "page": h.page, "score": h.rerank_score,
-                "sync_status": h.sync_status}
+    def _format_source(hit):
+        return {
+            "id": hit.id,
+            "source": hit.source,
+            "page": hit.page,
+            "score": hit.rerank_score,
+            "sync_status": hit.sync_status
+        }
 
-    NO_MEM = "I don't have anything relevant in memory for that."
+    NO_MEMORY_MSG = "I do not have sufficient grounded memory on this topic to answer accurately."
 
     @app.post("/chat")
     def chat(body: QueryIn):
         c = C()
-        r, usable = _grounded(body.query)
-        if not usable:                                    # never let the LLM improvise
-            return {"answer": NO_MEM, "grounded": False, "sources": [], "timings_ms": r.timings_ms}
+        res, usable_hits = _grounded_context(body.query)
+        if not usable_hits:
+            return {
+                "answer": NO_MEMORY_MSG,
+                "grounded": False,
+                "sources": [],
+                "timings_ms": res.timings_ms
+            }
+
         try:
-            import time
             t0 = time.perf_counter()
-            ans = c.llm.answer(body.query, usable)
-            r.timings_ms["llm"] = round((time.perf_counter() - t0) * 1000, 1)
-            return {"answer": ans, "grounded": True, "sources": [_src(h) for h in usable], "timings_ms": r.timings_ms}
-        except Exception as e:
-            log.exception("LLM failure")
-            return {"answer": None, "grounded": True, "llm_error": f"{type(e).__name__}",
-                    "sources": [_src(h) for h in usable], "timings_ms": r.timings_ms}
+            answer_text = c.llm.answer(body.query, usable_hits)
+            res.timings_ms["llm"] = round((time.perf_counter() - t0) * 1000, 1)
+            return {
+                "answer": answer_text,
+                "grounded": True,
+                "sources": [_format_source(h) for h in usable_hits],
+                "timings_ms": res.timings_ms
+            }
+        except Exception as err:
+            log.exception("Local LLM Generation Error")
+            return {
+                "answer": None,
+                "grounded": True,
+                "llm_error": type(err).__name__,
+                "sources": [_format_source(h) for h in usable_hits],
+                "timings_ms": res.timings_ms
+            }
 
     @app.post("/chat/stream")
     def chat_stream(body: QueryIn):
         c = C()
-        r, usable = _grounded(body.query)
+        res, usable_hits = _grounded_context(body.query)
 
-        def gen():
-            yield f"event: sources\ndata: {json.dumps([_src(h) for h in usable])}\n\n"
-            if not usable:
-                yield f"event: token\ndata: {json.dumps(NO_MEM)}\n\n"
+        def event_generator():
+            yield f"event: sources\ndata: {json.dumps([_format_source(h) for h in usable_hits])}\n\n"
+            if not usable_hits:
+                yield f"event: token\ndata: {json.dumps(NO_MEMORY_MSG)}\n\n"
             else:
                 try:
-                    for tok in c.llm.stream(body.query, usable):
-                        yield f"event: token\ndata: {json.dumps(tok)}\n\n"
-                except Exception as e:
-                    yield f"event: error\ndata: {json.dumps(type(e).__name__)}\n\n"
-            yield f"event: done\ndata: {json.dumps(r.timings_ms)}\n\n"
+                    for token in c.llm.stream(body.query, usable_hits):
+                        yield f"event: token\ndata: {json.dumps(token)}\n\n"
+                except Exception as err:
+                    yield f"event: error\ndata: {json.dumps(type(err).__name__)}\n\n"
+            yield f"event: done\ndata: {json.dumps(res.timings_ms)}\n\n"
 
-        return StreamingResponse(gen(), media_type="text/event-stream")
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
 
-    # --------------------------------------------------------------- memories
+    # ----------------------------------------------------------- MEMORIES
+
     @app.get("/memories")
-    def memories(status: str | None = Query(None), source: str | None = None, include_deleted: bool = False,
-                 limit: int = Query(50, ge=1, le=200), offset: str | None = None):
-        if status and status not in M.STATUSES:
-            raise HTTPException(422, f"status must be one of {M.STATUSES}")
-        recs, nxt = C().memory.list_memories(status, source, include_deleted, limit, offset)
-        return {"items": [_view(r, full=False) for r in recs], "next_offset": str(nxt) if nxt else None}
+    def list_memories(
+        status_filter: str | None = Query(None, alias="status"),
+        source: str | None = None,
+        include_deleted: bool = False,
+        limit: int = Query(50, ge=1, le=200),
+        offset: str | None = None
+    ):
+        if status_filter and status_filter not in M.STATUSES:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"Invalid status filter. Must be one of {M.STATUSES}")
+        records, next_off = C().memory.list_memories(status_filter, source, include_deleted, limit, offset)
+        return {
+            "items": [_view(r, full=False) for r in records],
+            "next_offset": str(next_off) if next_off else None
+        }
 
     @app.get("/memories/{id_}")
-    def memory(id_: str):
-        r = C().edge.get(id_)
-        if not r:
-            raise HTTPException(404, "not found")
-        return _view(r)
+    def get_memory(id_: str):
+        record = C().edge.get(id_)
+        if not record:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Memory record not found")
+        return _view(record)
 
     @app.put("/memories/{id_}")
-    def update(id_: str, body: UpdateIn):
-        try:
-            return C().memory.update_memory(id_, body.text)
-        except NotFound:
-            raise HTTPException(404, "not found")
-        except Invalid as e:
-            raise HTTPException(409, str(e))
+    async def update_memory(id_: str, body: UpdateIn):
+        async with app.state.sync_lock:
+            try:
+                return await run_in_threadpool(C().memory.update_memory, id_, body.text)
+            except NotFound:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Memory record not found")
+            except Invalid as e:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
 
     @app.delete("/memories/{id_}")
-    def delete(id_: str):
-        try:
-            return C().memory.delete_memory(id_)
-        except NotFound:
-            raise HTTPException(404, "not found")
+    async def delete_memory(id_: str):
+        async with app.state.sync_lock:
+            try:
+                return await run_in_threadpool(C().memory.delete_memory, id_)
+            except NotFound:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Memory record not found")
 
-    # ------------------------------------------------------------------- sync
+    # ------------------------------------------------------- SYNC & CLOUD
+
     @app.post("/sync")
-    async def sync_now():
-        return (await asyncio.to_thread(C().sync.run_once)).dict()
+    @app.post("/sync/bidirectional")
+    async def sync_bidirectional():
+        """Full 2-way synchronization cycle between Local Qdrant and Cloud Cluster."""
+        async with app.state.sync_lock:
+            report = await asyncio.to_thread(C().sync.run_once)
+            return report.dict() if hasattr(report, "dict") else report
+
+    @app.post("/sync/push")
+    async def sync_push():
+        """Pushes pending local memories to Qdrant Cloud."""
+        async with app.state.sync_lock:
+            return await asyncio.to_thread(C().sync.push_only)
+
+    @app.post("/sync/pull")
+    async def sync_pull():
+        """Pulls updated memories from Qdrant Cloud down to Edge storage."""
+        async with app.state.sync_lock:
+            return await asyncio.to_thread(C().sync.pull_only)
+
+    @app.get("/sync/status")
+    def sync_status():
+        c = C()
+        online = c.conn.probe()
+        edge_counts = c.memory.counts()
+        cloud_count = c.cloud.count(None) if online else 0
+        return {
+            "online": online,
+            "local_vectors": edge_counts.get("total", 0),
+            "cloud_vectors": cloud_count,
+            "last_sync": c.sync.state.get("last_sync_at")
+        }
 
     @app.post("/network")
-    async def network(body: NetworkIn):
-        """Demo switch: simulate losing/regaining connectivity."""
+    async def toggle_network(body: NetworkIn):
+        """Simulate losing/gaining internet connectivity for testing offline resilience."""
         c = C()
         c.conn.set_forced_offline(not body.online)
         c.audit.record("network", online=body.online, forced=not body.online)
         app.state.wake.set()
-        return {"online": await asyncio.to_thread(c.conn.probe, False), "forced_offline": c.conn.forced_offline}
+        return {
+            "online": await asyncio.to_thread(c.conn.probe, False),
+            "forced_offline": c.conn.forced_offline
+        }
 
     @app.get("/conflicts")
-    def conflicts():
-        return {"items": [_view(r) for r in C().edge.all(M_status(M.CONFLICT))]}
+    def list_conflicts():
+        from .store import f_status
+        return {"items": [_view(r) for r in C().edge.all(f_status(M.CONFLICT))]}
 
     @app.post("/conflicts/{id_}/resolve")
-    async def resolve(id_: str, body: ResolveIn):
-        try:
-            return await asyncio.to_thread(C().sync.resolve, id_, body.strategy)
-        except Offline as e:
-            raise HTTPException(503, str(e))
-        except ConflictError as e:
-            raise HTTPException(409, str(e))
+    async def resolve_conflict(id_: str, body: ResolveIn):
+        async with app.state.sync_lock:
+            try:
+                return await asyncio.to_thread(C().sync.resolve, id_, body.strategy)
+            except Offline as e:
+                raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(e))
+            except ConflictError as e:
+                raise HTTPException(status.HTTP_409_CONFLICT, str(e))
 
-    # -------------------------------------------------------- activity & audit
+    # ----------------------------------------------------- AUDIT & EVENTS
+
     @app.get("/activity")
-    def activity(limit: int = Query(100, ge=1, le=500), types: str | None = None):
-        return {"items": C().audit.recent(limit, set(types.split(",")) if types else None)}
+    def get_activity(limit: int = Query(100, ge=1, le=500), types: str | None = None):
+        type_set = set(types.split(",")) if types else None
+        return {"items": C().audit.recent(limit, type_set)}
 
     @app.get("/audit/verify")
-    def audit_verify():
+    def verify_audit():
         return C().audit.verify()
 
     @app.get("/events")
-    async def events():
+    async def sse_events():
         c = C()
-        q = c.audit.subscribe(asyncio.get_running_loop())
+        event_queue = c.audit.subscribe(asyncio.get_running_loop())
 
-        async def gen():
+        async def stream():
             try:
                 yield "retry: 2000\n\n"
                 while True:
                     try:
-                        e = await asyncio.wait_for(q.get(), timeout=15)
-                        yield f"data: {json.dumps(e)}\n\n"
+                        evt = await asyncio.wait_for(event_queue.get(), timeout=15)
+                        yield f"data: {json.dumps(evt)}\n\n"
                     except asyncio.TimeoutError:
                         yield ": keepalive\n\n"
             finally:
-                c.audit.unsubscribe(q)
+                c.audit.unsubscribe(event_queue)
 
-        return StreamingResponse(gen(), media_type="text/event-stream")
+        return StreamingResponse(stream(), media_type="text/event-stream")
 
     return app
-
-
-def M_status(s):
-    from .store import f_status
-    return f_status(s)
 
 
 app = create_app()

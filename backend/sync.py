@@ -138,6 +138,7 @@ class SyncEngine:
 
     # ------------------------------------------------------------------ driver
     def run_once(self) -> SyncReport:
+        """Full bidirectional sync."""
         rep = SyncReport()
         if not self._run_lock.acquire(blocking=False):
             rep.skipped = "sync already running"
@@ -153,7 +154,7 @@ class SyncEngine:
             self._pull(rep)
             self.state.update(last_sync_at=time.time(), last_report=rep.dict())
             self._save_state()
-        except Exception as e:                           # network dropped mid-run etc.
+        except Exception as e:
             rep.errors.append(f"{type(e).__name__}: {e}")
             self._cloud_ready = False
             self.conn.mark_failed()
@@ -164,6 +165,88 @@ class SyncEngine:
         if rep.pushed or rep.pulled or rep.conflicts or rep.retracted or rep.errors:
             self.audit.record("sync_run", **{k: v for k, v in rep.dict().items() if k != "skipped"})
         return rep
+
+    def push_only(self) -> dict:
+        """Force-pushes all eligible local records to Qdrant Cloud (Bulletproof)."""
+        rep = SyncReport()
+        if not self._run_lock.acquire(blocking=False):
+            rep.skipped = "sync already running"
+            return rep.dict()
+        
+        t0 = time.perf_counter()
+        try:
+            self._ensure_cloud()
+            
+            # Fetch records WITH vectors to avoid NoneType errors
+            all_records = self.edge.all()
+            uploaded_count = 0
+            
+            print(f"[SYNC DEBUG] Found {len(all_records)} total records in local edge storage.")
+
+            for rec in all_records:
+                payload = dict(rec.payload)
+                status = payload.get("sync_status", "")
+                
+                # Skip local-only sensitive records
+                if status == M.LOCAL_ONLY or payload.get("sensitivity") == "sensitive":
+                    print(f"[SYNC PRIVACY] Skipping local_only record: {rec.id[:8]}")
+                    continue
+                
+                # Retrieve the full record including vectors if missing
+                full_rec = self.edge.get(rec.id, vectors=True)
+                if not full_rec or not full_rec.vector:
+                    print(f"[SYNC WARN] Record {rec.id[:8]} has no vector data, skipping.")
+                    continue
+
+                payload["sync_status"] = M.SYNCED
+                payload["updated_at"] = time.time()
+                
+                # Safe upsert with validated vectors
+                self.cloud.upsert(full_rec.id, full_rec.vector, payload)
+                
+                # Update local state
+                self.edge.set_payload(full_rec.id, {"sync_status": M.SYNCED, "synced_version": payload.get("version", 1)})
+                uploaded_count += 1
+                print(f"[SYNC SUCCESS] Pushed record {full_rec.id[:8]} to Qdrant Cloud.")
+
+            rep.pushed = uploaded_count
+            self.state.update(last_sync_at=time.time())
+            self._save_state()
+            self.audit.record("sync_push_force", pushed=uploaded_count)
+            
+        except Exception as e:
+            rep.errors.append(f"{type(e).__name__}: {e}")
+            print(f"[SYNC ERROR] Push failed: {e}")
+            self.conn.mark_failed()
+        finally:
+            rep.ms = round((time.perf_counter() - t0) * 1000, 1)
+            self._run_lock.release()
+            
+        return rep.dict()
+
+    def pull_only(self) -> dict:
+        """API exposed method for forcing a pull without pushing local changes."""
+        rep = SyncReport()
+        if not self._run_lock.acquire(blocking=False):
+            rep.skipped = "sync already running"
+            return rep.dict()
+        t0 = time.perf_counter()
+        try:
+            if not self.conn.probe(use_cache=False):
+                rep.online, rep.skipped = False, "offline"
+                return rep.dict()
+            self._ensure_cloud()
+            self._pull(rep)
+            self.state.update(last_sync_at=time.time())
+            self._save_state()
+            self.audit.record("sync_pull_only", pulled=rep.pulled)
+        except Exception as e:
+            rep.errors.append(f"{type(e).__name__}: {e}")
+            self.conn.mark_failed()
+        finally:
+            rep.ms = round((time.perf_counter() - t0) * 1000, 1)
+            self._run_lock.release()
+        return rep.dict()
 
     def _ensure_cloud(self) -> None:
         if not self._cloud_ready:
@@ -266,7 +349,6 @@ class SyncEngine:
             rep.converged += 1
         elif action == CONFLICT:
             self._conflict(self.edge.get(local.id, vectors=True), remote_meta, rep)
-        # PUSH: local is ahead; the push phase owns it.
 
     def _apply_remote(self, remote: Record) -> None:
         """Make the edge copy identical to the cloud copy."""
