@@ -278,11 +278,16 @@ def create_app(factory=build) -> FastAPI:
                 "timings_ms": res.timings_ms
             }
         except Exception as err:
-            log.exception("Local LLM Generation Error")
+            log.exception("Local LLM Generation Error — Falling back to direct grounded text extraction")
+            # Extractive Fallback: Synthesize answer directly from retrieved vectors
+            extracted_answers = [f"[{i}] {h.text}" for i, h in enumerate(usable_hits, 1)]
+            fallback_answer = "Based on grounded memory:\n\n" + "\n\n".join(extracted_answers)
+            
             return {
-                "answer": None,
+                "answer": fallback_answer,
                 "grounded": True,
                 "llm_error": type(err).__name__,
+                "fallback_mode": "extractive",
                 "sources": [_format_source(h) for h in usable_hits],
                 "timings_ms": res.timings_ms
             }

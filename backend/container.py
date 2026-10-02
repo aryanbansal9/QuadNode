@@ -61,10 +61,7 @@ def build(cfg: Config | None = None, *, embedder=None, reranker=None, privacy=No
     TARGET_COLLECTION = "quadnode_memory"
     # =================================================================
 
-    # EDGE: Embedded local vector storage on disk
     edge_client = edge_client or QdrantClient(path=str(cfg.edge_path))
-    
-    # CLOUD: Fetch explicitly from env
     cloud_url = os.getenv("QDRANT_URL") or cfg.cloud_url
     cloud_key = os.getenv("QDRANT_API_KEY") or cfg.cloud_api_key
 
@@ -76,11 +73,9 @@ def build(cfg: Config | None = None, *, embedder=None, reranker=None, privacy=No
             timeout=cfg.cloud_timeout
         )
 
-    # Initialize stores with the locked TARGET_COLLECTION
     edge = MemoryStore(edge_client, TARGET_COLLECTION, cfg.embed_dim, "edge", remote=False)
     cloud = MemoryStore(cloud_client, TARGET_COLLECTION, cfg.embed_dim, "cloud", remote=True)
     
-    # Ensure collections exist
     edge.ensure()
     try:
         cloud.ensure()
@@ -89,6 +84,7 @@ def build(cfg: Config | None = None, *, embedder=None, reranker=None, privacy=No
 
     conn = Connectivity(cloud)
     return Container(cfg, audit, edge, cloud, embedder, privacy, reranker,
-                     Retriever(cfg, edge, embedder, reranker),
+                     # UPDATED: Retriever now receives cloud and conn for Federated Search
+                     Retriever(cfg, edge, cloud, conn, embedder, reranker),
                      MemoryService(cfg, edge, embedder, privacy, audit),
                      conn, SyncEngine(cfg, edge, cloud, conn, audit), llm)
