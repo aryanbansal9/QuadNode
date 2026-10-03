@@ -1,108 +1,129 @@
-# QuadNode: Enterprise-Grade Edge AI Security & Memory Engine
+# 🧠 QuadNode: Enterprise-Grade Edge AI Security & Memory Engine
 
-Offline-first edge memory platform featuring per-chunk privacy gating, Reciprocal Rank Fusion (RRF) hybrid retrieval, local Llama 3.1 inference, and deterministic 3-way edge-to-cloud synchronization with conflict handling.
+**AI That Remembers Where It Operates.**
 
-## ✨ Core Features
-* **Dual-Engine Hybrid Retrieval:** Combines Nomic dense embeddings with BM25 sparse search via Reciprocal Rank Fusion (RRF) to capture both semantic intent and exact technical part numbers.
-* **Fail-Closed Privacy Gate:** GLiNER zero-shot PII filter flags sensitive credentials and tags chunks as `LOCAL_ONLY`, physically blocking them from outbound cloud queues.
-* **HMAC Hash-Chained Audit Trail:** Every memory modification links to the previous hash, enabling automated tamper checks via the `/audit/verify` endpoint.
-* **Hardware Auto-Tuning:** Automatically detects available GPU VRAM at startup to scale between Llama 3.1 8B and 3.2 3B models.
-* **Matryoshka Vector Truncation:** Compresses 768-dimensional embeddings to 256 dimensions, slashing edge storage and RAM usage by 66% while preserving accuracy.
+QuadNode is an offline-first Edge AI memory platform that allows intelligent systems to ingest, protect, remember, and reason over data locally—and synchronize with a global cloud only when safe and connected. 
 
----
-## 📂 Project Layout
-```
-backend/
-  config.py     Env-driven settings           models.py    Record schema + pure helpers
-  chunking.py   Sentence-aware chunker        privacy.py   Regex + entropy + GLiNER gate (per chunk)
-  embeddings.py Nomic dense + BM25 + rerank   store.py     Thread-safe Qdrant collection wrapper
-  retrieval.py  Hybrid RRF + rerank + explain service.py   Ingest / update / delete (versioned)
-  sync.py       Push / pull / conflicts       audit.py     HMAC hash-chained log + SSE fan-out
-  llm.py        Ollama (VRAM auto-pick)       container.py Wiring / dependency injection
-  main.py       FastAPI application router
-
-tests/          21 automated tests (real Qdrant, mock models)
-```
+Built for environments where cloud connectivity is unreliable (industrial facilities, disaster response, remote infrastructure) or where data privacy is paramount, QuadNode ensures AI never loses its context when the network goes dark.
 
 ---
 
-## 🚀 Quick Start & Running
+## 🔥 Core Technical Features
 
-### 1. Environment Setup
-```bash
-python -m venv venv
-venv\Scripts\activate          # Windows
-pip install -r requirements.txt
-```
+*   **Federated Hybrid Retrieval:** Simultaneously queries local Qdrant Edge and AWS Qdrant Cloud databases. Combines Nomic dense embeddings with BM25 sparse search, merges results via Reciprocal Rank Fusion (RRF), and deduplicates in real-time.
+*   **Cross-Encoder Reranking:** Passes fused vector results through a local `FlashRank` cross-encoder to guarantee the absolute highest-relevance context window for the LLM.
+*   **Fail-Closed Privacy Gate:** Uses `GLiNER` (Zero-shot NLP) to scan all incoming documents for PII and credentials. Sensitive chunks are permanently tagged as `LOCAL_ONLY` and physically blocked from outbound cloud sync queues.
+*   **Self-Healing Local LLM:** Contextual reasoning is executed strictly on-device using Ollama (Llama 3.1/3.2). Features an automatic "Extractive Fallback" mechanism that synthesizes raw vector text if the LLM encounters a hardware fault.
+*   **Deterministic 3-Way Synchronization:** Tracks vector edits via `version` and `synced_version` states. Handles multi-device collisions with a dedicated UI for `keep_local`, `keep_remote`, or `keep_both` resolution strategies.
+*   **Matryoshka Vector Truncation:** Compresses 768-dimensional embeddings down to 256 dimensions, slashing edge storage and RAM usage by 66% while preserving semantic accuracy.
 
-### 2. Pull Local Models (Ollama)
-```bash
-ollama pull llama3.1:latest    # (or llama3.2:3b for CPU-only nodes)
-```
-
-### 3. Run the Backend Server
-Note: Do not use `--reload` because the embedded Qdrant database maintains a strict file lock.
-```bash
-python -m uvicorn backend.main:app --port 8000
-```
-Open your browser at http://127.0.0.1:8000/docs to view the interactive Swagger API documentation.
-
-### 4. Run the Automated Test Suite
-```bash
-pytest -q
-```
 ---
-## 🌐 Multi-Device & Cloud Demo Setup
-To demonstrate real distributed edge-to-cloud synchronization with intermittent connectivity:
-### 1. Spin up a local Qdrant Cloud server via Docker:
-```bash
-docker run -p 6333:6333 qdrant/qdrant
-```
-### 2. Launch Edge Node A (Terminal 1):
-```bash
-set QN_CLOUD_URL=http://localhost:6333
-set QN_DEVICE_ID=EDGE-A
-python -m uvicorn backend.main:app --port 8000
-```
-### 3. Launch Edge Node B (Terminal 2):
-```bash
-set QN_CLOUD_URL=http://localhost:6333
-set QN_DEVICE_ID=EDGE-B
-python -m uvicorn backend.main:app --port 8001
-```
----
-## 🔌 Core API Reference
 
-| Endpoint | Description |
+## 🏗️ System Architecture
+
+QuadNode operates on a strict **Edge-First** pipeline. The cloud is a synchronization partner, not a single point of failure.
+
+```text
+              ┌─────────────────────────────────┐
+              │          USER DOCUMENT          │
+              └────────────────┬────────────────┘
+                               ▼
+              ┌─────────────────────────────────┐
+              │ GLiNER ZERO-SHOT PRIVACY FILTER │
+              └────────┬───────────────┬────────┘
+                       │               │
+                 [Sensitive]      [Safe Data]
+                       │               │
+                       ▼               ▼
+                 LOCAL_ONLY         PENDING ──────────┐
+                       │               │              │ (When Online)
+              ┌────────▼───────────────▼────────┐     ▼
+              │   QDRANT EDGE (Local Storage)   │   AWS QDRANT CLOUD
+              └────────┬────────────────────────┘     ▲
+                       │                              │
+              ┌────────▼──────────────────────────────┴─┐
+              │      FEDERATED HYBRID RETRIEVAL         │
+              │   (Dense + Sparse + RRF + FlashRank)    │
+              └────────┬────────────────────────────────┘
+                       ▼
+              ┌─────────────────────────────────┐
+              │     OLLAMA LOCAL LLM (RAG)      │
+              └────────┬────────────────────────┘
+                       ▼
+                 GROUNDED ANSWER
+```                 
+
+### Tech Stack
+| Component | Technology |
 | :--- | :--- |
-| `POST /ingest` or `POST /upload` | Ingests `.pdf`/`.txt` files, chunks text, applies GLiNER zero-shot privacy scans, and embeds into Edge DB |
-| `POST /search` | Returns explainable hybrid hits (dense rank, sparse rank, fused RRF rank, rerank score, timings) |
-| `POST /chat` or `POST /chat/stream` | Grounded local LLM response; never invokes the model without verified memory evidence |
-| `GET /memories` or `GET/PUT/DELETE /memories/{id}` | Inspect, edit, or delete stored memories |
-| `GET /status`, `POST /sync`, `POST /network` | Device telemetry, sync triggers, and live offline simulation toggle |
-| `GET /conflicts`, `POST /conflicts/{id}/resolve` | View conflicting concurrent edits and resolve via strategy (`keep_local`, `keep_remote`, `keep_both`) |
-| `GET /activity`, `GET /events`, `GET /audit/verify` | Live activity feed, Server-Sent Events stream, and HMAC tamper-evident audit verification |
-| `POST /privacy/preview` | Preview what secrets the privacy gate flags and see redacted output |
----
-## 🔄 Synchronization & Conflict Logic
-The system evaluates state changes using a 3-way version tracker (`version` vs `synced_version`):
+| **Frontend Console** | React, Vite, Tailwind CSS, Recharts |
+| **Backend API** | Python, FastAPI |
+| **Vector Storage (Edge & Cloud)**| Qdrant |
+| **Embeddings** | FastEmbed (`nomic-embed-text-v1.5`) |
+| **Reranking** | FlashRank |
+| **Entity/Privacy Detection** | GLiNER |
+| **Local LLM Engine** | Ollama (`Llama 3.1` / `3.2 3B`) |
 
-| Local Changed | Remote Changed | Resulting Action |
-| :--- | :--- | :--- |
-| Yes | No | **PUSH** |
-| No | Yes | **PULL** |
-| Yes | Yes (Content differs) | **CONFLICT** (Manual resolution or auto Last-Writer-Wins) |
-| Identical Content | Identical Content | **SAME** (Converge bookkeeping) |
+🚀 Getting Started
+1. Backend Setup (FastAPI Engine)
+Ensure you have Python 3.13+ and Ollama installed on your machine.
 
-* **Privacy Protection:** `LOCAL_ONLY` chunks containing sensitive credentials or PII are strictly quarantined and never transmitted to the cloud.
-* **Tombstones:** Deletions propagate securely across nodes via tombstones.
+```bash
+# Clone the repository
+git clone https://github.com/aryanbansal9/QuadNode.git
+cd QuadNode
 
----
- 
-## 🛡️ Known Limitations & Future Roadmap
+# Install dependencies
+pip install -r requirements.txt
+pip install qdrant-client ollama flashrank
 
-* **Native Edge Storage:** Currently utilizing embedded `qdrant-client` for offline vector storage. Future roadmap includes swapping the storage engine to `qdrant-edge-py` (Rust-based Edge Shards) for optimized performance on constrained devices.
+# Start Ollama and pull the default model
+ollama serve
+ollama pull llama3.2:3b  # Or llama3.1 if you have >= 6GB VRAM
+```
 
-* **Scanned PDFs:** Require external OCR integration.
+Environment Variables:
+Create a .env file in the root of the backend folder to connect to the global sync cluster:
 
-* **Clock Skew:** Last-Writer-Wins (`lww`) conflict resolution relies on system wall clocks.
+```
+QDRANT_URL=your_aws_qdrant_cloud_url
+QDRANT_API_KEY=your_qdrant_api_key
+```
+
+Start the Edge Server:
+
+```bash
+python -m uvicorn backend.main:app --port 8000
+```
+
+2. Frontend Setup (React UI)
+Open a new terminal window to start the Edge Intelligence Console.
+
+```bash
+# Navigate to the frontend directory
+cd QuadNode-frontend
+
+# Install dependencies
+npm install
+```
+
+**Environment Variables:**
+Create a `.env` file in the `QuadNode-frontend` directory:
+```env
+VITE_API_BASE_URL=http://127.0.0.1:8000
+VITE_USE_MOCK=false
+```
+
+**Start the Console:**
+```bash
+npm run dev
+```
+
+## 🧪 Hackathon Jury Demo Flow
+To demonstrate the full power of QuadNode to the judges, follow this sequence:
+
+1. **Ingestion & Privacy Guard:** Go to the **Documents** tab. Drag and drop a `.txt` file containing a fake AWS root key. Watch the GLiNER filter instantly quarantine the document as `LOCAL_ONLY`.
+2. **Federated Search:** Go to the **Search** tab. Search for a concept. Show how the results display exact Semantic, Keyword, and FlashRank cross-encoder confidence scores.
+3. **Local AI Reasoning:** Go to the **AI Assistant** tab. Ask a question about the document you just uploaded. The Llama model will answer locally and cite the exact source document.
+4. **The "Drop Network" Test:** Click the **Simulate cloud offline** button in the top navigation. Go back to the Assistant and ask another question. Prove that the LLM and vector retrieval still function perfectly without the internet.
+5. **Edge-to-Cloud Sync:** Restore the connection. Go to the **Synchronization** tab. Click **Sync Now**. Watch the `PENDING` safe vectors push to AWS Qdrant Cloud, while the `LOCAL_ONLY` secrets remain safely trapped on the edge device.
