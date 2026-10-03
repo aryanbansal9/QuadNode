@@ -1,41 +1,71 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { UploadCloud, FileText, CheckCircle2, Loader2 } from 'lucide-react';
 import { PageHeader, Card, CardHeader } from '../components/common/Card';
 import { SyncBadge } from '../components/common/Badge';
 import Badge from '../components/common/Badge';
 import Button from '../components/common/Button';
 import ProgressBar from '../components/common/ProgressBar';
-import { documents as seed } from '../data/documents';
 import { useConnection } from '../context/ConnectionContext';
+import { memoryService } from '../api/services';
 
 const stages = ['Upload', 'Processing', 'Embedded', 'Stored'];
 
 export default function Documents() {
-  const { isOffline, markDirty } = useConnection();
-  const [docs, setDocs] = useState(seed);
+  const { isOffline, markDirty, refreshStatus } = useConnection();
+  const [docs, setDocs] = useState([]); 
   const [drag, setDrag] = useState(false);
   const [uploading, setUploading] = useState(null);
+  const fileInputRef = useRef(null);
 
-  const simulateUpload = (name = 'Vibration_Baseline_Q3.pdf') => {
-    const doc = {
-      id: `DOC-${110 + docs.length}`, name, chunks: 0, status: 'Processing',
-      privacy: 'SYNC ALLOWED', added: new Date().toISOString(), syncStatus: 'PENDING', size: '2.8 MB',
+  // Processes a single file
+  const handleFileUpload = async (file) => {
+    const docId = `DOC-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+    
+    const newDoc = {
+      id: docId, name: file.name, chunks: 0, status: 'Processing',
+      privacy: 'SCANNING', added: new Date().toISOString(), 
+      syncStatus: 'PENDING', size: `${(file.size / 1024 / 1024).toFixed(2)} MB`,
     };
-    setDocs((d) => [doc, ...d]);
-    setUploading({ id: doc.id, stage: 0 });
-    markDirty();
-    let s = 0;
-    const iv = setInterval(() => {
-      s += 1;
-      if (s >= stages.length) {
-        clearInterval(iv);
+    
+    // Add to UI immediately
+    setDocs((prev) => [newDoc, ...prev]);
+    setUploading({ id: docId, stage: 0 });
+
+    try {
+      setUploading({ id: docId, stage: 1 });
+      const res = await memoryService.upload(file);
+      setUploading({ id: docId, stage: 2 });
+      
+      setTimeout(() => {
         setUploading(null);
-        setDocs((d) => d.map((x) => (x.id === doc.id ? { ...x, chunks: 64, status: 'Indexed', syncStatus: 'PENDING' } : x)));
-      } else {
-        setUploading({ id: doc.id, stage: s });
-        if (s === 2) setDocs((d) => d.map((x) => (x.id === doc.id ? { ...x, chunks: 64 } : x)));
-      }
-    }, 800);
+        setDocs((prevDocs) => prevDocs.map((x) => (x.id === docId ? { 
+          ...x, 
+          chunks: res.chunks || 1, 
+          status: 'Indexed',
+          privacy: res.local_only > 0 ? 'LOCAL ONLY' : 'SYNC ALLOWED',
+          syncStatus: res.local_only > 0 ? 'LOCAL ONLY' : 'PENDING'
+        } : x)));
+        markDirty();
+        refreshStatus();
+      }, 800);
+      
+    } catch (err) {
+      console.error(`Upload failed for ${file.name}`, err);
+      setUploading(null);
+      setDocs((prevDocs) => prevDocs.map((x) => (x.id === docId ? { ...x, status: 'Failed', privacy: 'ERROR' } : x)));
+    }
+  };
+
+  // Loop through multiple selected or dropped files
+  const handleFiles = (files) => {
+    if (!files || files.length === 0) return;
+    Array.from(files).forEach(file => handleFileUpload(file));
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setDrag(false);
+    handleFiles(e.dataTransfer.files);
   };
 
   return (
@@ -44,25 +74,37 @@ export default function Documents() {
         eyebrow="Local ingestion pipeline"
         title="Documents"
         subtitle={isOffline ? 'Local ingestion continues while offline. Sync queues automatically.' : 'Ingest → chunk → embed locally → store in Qdrant Edge.'}
-        actions={<Button size="sm" onClick={() => simulateUpload()}><UploadCloud size={14} /> Upload document</Button>}
+        actions={
+          <>
+            <input 
+              type="file" 
+              ref={fileInputRef} 
+              className="hidden" 
+              accept=".pdf,.txt" 
+              multiple // Allows selecting multiple files in the dialog
+              onChange={(e) => {
+                handleFiles(e.target.files);
+                e.target.value = null; // Resets input so you can upload the exact same file again
+              }} 
+            />
+            <Button size="sm" onClick={() => fileInputRef.current?.click()}>
+              <UploadCloud size={14} /> Upload document
+            </Button>
+          </>
+        }
       />
 
-      {/* Dropzone */}
       <div
         onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
         onDragLeave={() => setDrag(false)}
-        onDrop={(e) => { e.preventDefault(); setDrag(false); simulateUpload(e.dataTransfer.files?.[0]?.name || 'Dropped_Document.pdf'); }}
+        onDrop={handleDrop}
         className={`card-enter flex flex-col items-center justify-center rounded-xl border border-dashed px-6 py-10 text-center transition-all duration-200 ${drag ? 'scale-[1.005] border-blue-500/60 bg-blue-500/5 dark:border-cyan-400/60 dark:bg-cyan-500/5' : 'border-slate-300 bg-white dark:border-white/15 dark:bg-white/[0.02]'}`}
-        role="button"
-        tabIndex={0}
-        onKeyDown={(e) => e.key === 'Enter' && simulateUpload()}
-        aria-label="Upload documents"
       >
         <span className={`flex h-12 w-12 items-center justify-center rounded-2xl transition-colors ${drag ? 'bg-blue-500/15 text-blue-600 dark:bg-cyan-500/15 dark:text-cyan-300' : 'bg-slate-100 text-slate-400 dark:bg-white/5 dark:text-slate-500'}`}>
           <UploadCloud size={22} />
         </span>
-        <p className="mt-3 text-sm font-medium text-slate-700 dark:text-slate-200">Drag & drop files here, or <button className="cursor-pointer text-blue-600 underline underline-offset-2 dark:text-cyan-300" onClick={() => simulateUpload()}>browse</button></p>
-        <p className="mt-1 font-mono text-[11px] tracking-wider text-slate-400 uppercase dark:text-slate-500">PDF · TXT · DOCX — embedded locally with Nomic</p>
+        <p className="mt-3 text-sm font-medium text-slate-700 dark:text-slate-200">Drag & drop files here, or <button className="cursor-pointer text-blue-600 underline underline-offset-2 dark:text-cyan-300" onClick={() => fileInputRef.current?.click()}>browse</button></p>
+        <p className="mt-1 font-mono text-[11px] tracking-wider text-slate-400 uppercase dark:text-slate-500">PDF · TXT — embedded locally with Nomic</p>
         {uploading && (
           <div className="mt-5 w-full max-w-md">
             <div className="mb-2 flex justify-between font-mono text-[11px] text-slate-400 dark:text-slate-400">
@@ -76,7 +118,7 @@ export default function Documents() {
       </div>
 
       <Card className="card-enter stagger-2 mt-4 overflow-hidden">
-        <CardHeader title="Ingested documents" subtitle={`${docs.length} files · chunked + embedded on-device`} />
+        <CardHeader title="Session Document Queue" subtitle={`${docs.length} files processed in this session`} />
         <div className="overflow-x-auto">
           <table className="w-full min-w-[720px] text-left text-sm">
             <thead>
@@ -90,6 +132,11 @@ export default function Documents() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200/70 dark:divide-white/10">
+              {docs.length === 0 && (
+                <tr>
+                  <td colSpan="6" className="py-6 text-center text-xs text-slate-400">No documents uploaded this session.</td>
+                </tr>
+              )}
               {docs.map((d) => (
                 <tr key={d.id} className="transition-colors hover:bg-slate-50 dark:hover:bg-white/[0.03]">
                   <td className="px-4 py-2.5">
@@ -97,18 +144,18 @@ export default function Documents() {
                       <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-blue-500/10 text-blue-600 dark:bg-cyan-500/10 dark:text-cyan-300">
                         <FileText size={14} />
                       </span>
-                      <div><p className="font-medium text-slate-800 dark:text-slate-200">{d.name}</p><p className="font-mono text-[11px] text-slate-400 dark:text-slate-500">{d.id} · {d.size}</p></div>
+                      <div><p className="font-medium text-slate-800 dark:text-slate-200">{d.name}</p><p className="font-mono text-[11px] text-slate-400 dark:text-slate-500">{d.id} · {d.size || 'N/A'}</p></div>
                     </div>
                   </td>
                   <td className="tnum px-4 py-2.5 font-mono text-slate-700 dark:text-slate-300">{d.chunks}</td>
                   <td className="px-4 py-2.5">
                     <span className="inline-flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300">
-                      {d.status === 'Processing' ? <Loader2 size={13} className="animate-spin text-amber-500" /> : <CheckCircle2 size={13} className="text-emerald-500" />}
+                      {d.status === 'Processing' ? <Loader2 size={13} className="animate-spin text-amber-500" /> : d.status === 'Failed' ? <span className="text-red-500">Failed</span> : <CheckCircle2 size={13} className="text-emerald-500" />}
                       {d.status}
                     </span>
                   </td>
-                  <td className="px-4 py-2.5"><Badge tone={d.privacy === 'LOCAL ONLY' ? 'slate' : 'cyan'}>{d.privacy}</Badge></td>
-                  <td className="px-4 py-2.5 font-mono text-xs text-slate-400 dark:text-slate-500">{new Date(d.added).toLocaleDateString()}</td>
+                  <td className="px-4 py-2.5"><Badge tone={d.privacy === 'LOCAL ONLY' ? 'red' : d.privacy === 'ERROR' ? 'slate' : 'cyan'}>{d.privacy}</Badge></td>
+                  <td className="px-4 py-2.5 font-mono text-xs text-slate-400 dark:text-slate-500">{new Date(d.added).toLocaleTimeString()}</td>
                   <td className="px-4 py-2.5"><SyncBadge status={d.syncStatus} /></td>
                 </tr>
               ))}

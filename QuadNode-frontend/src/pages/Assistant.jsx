@@ -7,24 +7,18 @@ import { useConnection } from '../context/ConnectionContext';
 import { chatService } from '../api/services';
 import { cx } from '../utils/format';
 
-const seedMessages = [
-  { role: 'user', text: 'What should I check if Pump P-204 shows abnormal vibration?' },
+// Replaced the hardcoded Pump P-204 query with a clean welcome message
+const welcomeMessage = [
   {
     role: 'ai',
-    text: 'Based on the available local memory, the recommended first step is to inspect the pump bearing and review the previous maintenance record. Vibration above 4.5 mm/s exceeds the E47 alarm threshold; MEM-1841 records a recent SKF 6311 replacement that returned vibration to 1.8 mm/s. Recheck coupling torque (68 N·m) and bearing temperature trend.',
-    sources: [
-      { name: 'Cooling_System_Manual.pdf', relevance: 91, type: 'Document', locality: 'Local' },
-      { name: 'P204_Maintenance_Log', relevance: 86, type: 'Observation', locality: 'Local' },
-      { name: 'Local Memory #1842', relevance: 84, type: 'Observation', locality: 'Local' },
-    ],
-    confidence: 91,
+    text: 'Hello! I am QuadNode, your local edge AI assistant. Ask me anything about your ingested memories.',
   },
 ];
 
 const suggestions = [
-  { icon: Wrench, label: 'P-204 vibration threshold?' },
-  { icon: Thermometer, label: 'E47 cooling envelope?' },
-  { icon: Zap, label: 'Coupling torque spec?' },
+  { icon: Wrench, label: 'What is the root AWS key?' },
+  { icon: Thermometer, label: 'Where will Project Pegasus launch?' },
+  { icon: Zap, label: 'Who changed the backend?' },
 ];
 
 function pctOf(s) {
@@ -35,7 +29,8 @@ function pctOf(s) {
 
 export default function Assistant() {
   const { isOffline, edgeAvailable } = useConnection();
-  const [messages, setMessages] = useState(seedMessages);
+  // Initializes state with the clean welcome message instead of seed data
+  const [messages, setMessages] = useState(welcomeMessage);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const scrollRef = useRef(null);
@@ -53,22 +48,29 @@ export default function Assistant() {
     setLoading(true);
     try {
       const res = await chatService.send(q);
-      const sources = Array.isArray(res.sources) ? res.sources : [];
+      
+      const mappedSources = (res.sources || []).map(s => ({
+          name: s.source || 'Manual Note',
+          relevance: s.score ? Math.round(s.score * 100) : 75,
+          type: s.source?.includes('.txt') || s.source?.includes('.pdf') ? 'Document' : 'Observation',
+          locality: s.sync_status === 'LOCAL_ONLY' ? 'Local Only' : 'Cloud/Edge'
+      }));
+
+      const confidenceScore = mappedSources.length > 0 ? mappedSources[0].relevance : null;
+
       setMessages((m) => [...m, {
         role: 'ai',
         text: res.answer || '(empty response from edge backend)',
-        sources,
-        confidence: typeof res.confidence === 'number' ? res.confidence : null,
-        cacheHit: !!res.cache_hit,
-        timeMs: res.time_ms ?? null,
+        sources: mappedSources,
+        confidence: confidenceScore,
+        cacheHit: false,
+        timeMs: res.timings_ms?.total ?? null,
+        isFallback: res.fallback_mode === 'extractive' 
       }]);
     } catch (err) {
-      const offline = !err?.response;
       setMessages((m) => [...m, {
         role: 'ai',
-        text: offline
-          ? 'Edge backend unreachable at http://127.0.0.1:8000. Start it with run.bat / uvicorn backend.main:app, then ask again. Your question was kept — nothing was sent to any cloud.'
-          : `Edge backend error: ${err?.response?.data?.detail || err.message}`,
+        text: `Edge backend error: ${err?.message || 'Unreachable'}`,
         sources: [],
         confidence: null,
         error: true,
@@ -104,7 +106,7 @@ export default function Assistant() {
       )}
 
       <div className="grid gap-4 xl:grid-cols-3">
-        {/* Conversation */}
+        {/* Conversation Area */}
         <Card className="flex min-h-[560px] flex-col overflow-hidden xl:col-span-2">
           <div ref={scrollRef} className="flex-1 space-y-5 overflow-y-auto px-5 py-5">
             {messages.map((m, i) =>
@@ -124,7 +126,7 @@ export default function Assistant() {
                     <p className="flex flex-wrap items-center gap-2 font-mono text-[10px] tracking-widest uppercase">
                       <span className="flex items-center gap-1.5 text-violet-600 dark:text-violet-300"><Cpu size={11} /> QuadNode Local</span>
                       <Badge tone="emerald">Edge AI</Badge>
-                      {m.cacheHit && <Badge tone="cyan">Cache hit</Badge>}
+                      {m.isFallback && <Badge tone="amber">Extractive Fallback</Badge>}
                       {m.timeMs != null && <span className="tnum text-slate-400 dark:text-slate-500">{m.timeMs} ms</span>}
                     </p>
                     <p className="mt-1.5 text-sm leading-relaxed text-slate-700 dark:text-slate-200">{m.text}</p>
@@ -132,8 +134,8 @@ export default function Assistant() {
                       <div className="mt-3 border-t border-slate-200 pt-3 dark:border-white/10">
                         <p className="font-mono text-[10px] tracking-widest text-slate-400 uppercase dark:text-slate-500">Sources · Qdrant Edge</p>
                         <div className="mt-2 grid gap-2 sm:grid-cols-3">
-                          {m.sources.map((s) => (
-                            <div key={s.name} className="group rounded-lg border border-slate-200 bg-white p-2.5 transition-all duration-150 hover:-translate-y-px hover:shadow-sm dark:border-white/10 dark:bg-black/30 dark:hover:border-white/20">
+                          {m.sources.map((s, idx) => (
+                            <div key={idx} className="group rounded-lg border border-slate-200 bg-white p-2.5 transition-all duration-150 hover:-translate-y-px hover:shadow-sm dark:border-white/10 dark:bg-black/30 dark:hover:border-white/20">
                               <div className="flex items-center gap-1.5">
                                 {s.type === 'Document' ? <FileText size={12} className="shrink-0 text-blue-500 dark:text-cyan-300" /> : <Database size={12} className="shrink-0 text-violet-500 dark:text-violet-300" />}
                                 <p className="truncate text-xs font-medium text-slate-700 dark:text-slate-200" title={s.text || s.name}>{s.name}</p>
@@ -143,7 +145,7 @@ export default function Assistant() {
                               </div>
                               <div className="mt-1.5 flex items-center justify-between">
                                 <span className="tnum font-mono text-[11px] text-slate-500">{pctOf(s)}%</span>
-                                <Badge tone="emerald">{s.locality || 'Local'}</Badge>
+                                <Badge tone={s.locality === 'Local Only' ? 'red' : 'emerald'}>{s.locality}</Badge>
                               </div>
                             </div>
                           ))}
@@ -190,22 +192,21 @@ export default function Assistant() {
                 onKeyDown={(e) => e.key === 'Enter' && send()}
                 placeholder="Ask the local AI…"
                 className="qn-input min-w-0 flex-1 rounded-xl px-3.5 py-2.5 text-sm"
-                aria-label="Ask the local AI"
               />
-              <Button onClick={() => send()} disabled={loading || !input.trim()} aria-label="Send message" className="!rounded-xl">
+              <Button onClick={() => send()} disabled={loading || !input.trim()} className="!rounded-xl">
                 <Send size={15} /> Send
               </Button>
             </div>
           </div>
         </Card>
 
-        {/* Context panel */}
+        {/* Context panel (Frontend Only, untouched) */}
         <div className="space-y-4">
           <Card className="card-enter stagger-1 p-4">
             <h3 className="font-mono text-[11px] tracking-[0.14em] text-slate-400 uppercase dark:text-slate-400">Retrieval Context</h3>
             <dl className="mt-3 space-y-2.5 text-xs">
               {[
-                ['Vector store', 'Qdrant Edge :6333'],
+                ['Vector store', 'Qdrant Edge'],
                 ['Edge reachable', edgeAvailable === false ? 'NO' : 'YES'],
                 ['Top-k', '3 / threshold 0.05'],
                 ['Embeddings', 'Nomic · local'],
@@ -214,17 +215,6 @@ export default function Assistant() {
                 <div key={k} className="flex justify-between gap-2"><dt className="text-slate-400 dark:text-slate-500">{k}</dt><dd className="font-mono text-slate-700 dark:text-slate-300">{v}</dd></div>
               ))}
             </dl>
-          </Card>
-          <Card className="card-enter stagger-2 p-4">
-            <h3 className="font-mono text-[11px] tracking-[0.14em] text-slate-400 uppercase dark:text-slate-400">Memory Policy</h3>
-            <p className="mt-2 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
-              New memories default to <span className="font-medium text-blue-600 dark:text-cyan-300">PENDING</span> unless classified sensitive, in which case they stay{' '}
-              <span className="font-medium text-slate-700 dark:text-slate-200">LOCAL ONLY</span> and never leave the device.
-            </p>
-            <div className="mt-3 flex gap-2">
-              <Badge tone="cyan">Sync allowed</Badge>
-              <Badge tone="slate">Local only</Badge>
-            </div>
           </Card>
           <Card className={cx('card-enter stagger-3 border-blue-500/20 p-4 dark:border-cyan-500/20')}>
             <h3 className="font-mono text-[11px] tracking-[0.14em] text-blue-600 uppercase dark:text-cyan-300">Pipeline</h3>

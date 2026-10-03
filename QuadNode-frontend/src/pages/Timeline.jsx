@@ -1,32 +1,64 @@
-import { FileText, Database, Cpu, Download, WifiOff, Wifi, RefreshCw, GitBranch, CheckCircle2 } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { FileText, Database, Cpu, Download, WifiOff, Wifi, RefreshCw, GitBranch, CheckCircle2, ShieldAlert } from 'lucide-react';
 import { PageHeader, Card, CardHeader } from '../components/common/Card';
 import Badge from '../components/common/Badge';
-import { timelineEvents } from '../data/timeline';
+import { timelineEvents as seedEvents } from '../data/timeline';
+import { memoryService } from '../api/services';
 
 const kindIcon = {
-  document: { Icon: FileText, cls: 'border-cyan-500/30 bg-cyan-500/10 text-cyan-600 dark:text-cyan-300', label: 'cyan' },
-  memory: { Icon: Database, cls: 'border-slate-300 bg-slate-100 text-slate-500 dark:border-white/10 dark:bg-white/5 dark:text-slate-300', label: 'slate' },
-  ai: { Icon: Cpu, cls: 'border-violet-500/30 bg-violet-500/10 text-violet-600 dark:text-violet-300', label: 'violet' },
-  retrieval: { Icon: Download, cls: 'border-slate-300 bg-slate-100 text-slate-500 dark:border-white/10 dark:bg-white/5 dark:text-slate-300', label: 'slate' },
-  offline: { Icon: WifiOff, cls: 'border-red-500/30 bg-red-500/10 text-red-500 dark:text-red-300', label: 'red' },
-  online: { Icon: Wifi, cls: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300', label: 'emerald' },
-  sync: { Icon: RefreshCw, cls: 'border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-300', label: 'amber' },
-  conflict: { Icon: GitBranch, cls: 'border-orange-500/30 bg-orange-500/10 text-orange-600 dark:text-orange-300', label: 'orange' },
+  memory_ingested: { Icon: FileText, cls: 'border-cyan-500/30 bg-cyan-500/10 text-cyan-600', label: 'cyan' },
+  memory_updated: { Icon: Database, cls: 'border-blue-500/30 bg-blue-500/10 text-blue-600', label: 'blue' },
+  network: { Icon: Wifi, cls: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600', label: 'emerald' },
+  network_offline: { Icon: WifiOff, cls: 'border-red-500/30 bg-red-500/10 text-red-500', label: 'red' },
+  sync_pushed: { Icon: RefreshCw, cls: 'border-amber-500/30 bg-amber-500/10 text-amber-600', label: 'amber' },
+  privacy_quarantine: { Icon: ShieldAlert, cls: 'border-red-500/30 bg-red-500/10 text-red-600', label: 'red' }
 };
 
 export default function Timeline() {
+  const [events, setEvents] = useState(seedEvents);
+  
+  useEffect(() => {
+    const fetchLogs = async () => {
+      try {
+        const res = await memoryService.activity(20);
+        if (res && res.items) {
+          const mappedLogs = res.items.map(log => {
+            const isOffline = log.type === 'network' && log.forced;
+            const isQuarantine = log.status === 'LOCAL_ONLY';
+            
+            let kind = log.type;
+            if (isOffline) kind = 'network_offline';
+            if (isQuarantine) kind = 'privacy_quarantine';
+
+            return {
+              time: new Date(log.timestamp * 1000).toLocaleTimeString(),
+              title: isQuarantine ? 'Privacy Guard Triggered' : log.type.replace('_', ' ').toUpperCase(),
+              kind: kind,
+              detail: log.source ? `Processed ${log.source}` : JSON.stringify(log),
+              device: 'EDGE-001'
+            };
+          });
+          setEvents(prev => [...mappedLogs, ...prev]);
+        }
+      } catch (e) {
+        console.warn("Could not fetch live audit logs");
+      }
+    };
+    fetchLogs();
+  }, []);
+
   return (
     <div>
       <PageHeader eyebrow="Audit trail" title="Timeline" subtitle="Full lifecycle of edge memory — from ingestion to resolution." />
 
       <Card className="card-enter overflow-hidden">
-        <CardHeader title="Memory lifecycle" subtitle="EDGE-001 · Sep 29, 2026" right={<Badge tone="emerald"><CheckCircle2 size={11} /> 11 events</Badge>} />
+        <CardHeader title="System Activity Logs" subtitle="Live API telemetry" right={<Badge tone="emerald"><CheckCircle2 size={11} /> Live</Badge>} />
         <ol className="px-5 py-4">
-          {timelineEvents.map((e, i) => {
-            const k = kindIcon[e.kind] || kindIcon.memory;
+          {events.map((e, i) => {
+            const k = kindIcon[e.kind] || { Icon: Database, cls: 'border-slate-300 bg-slate-100 text-slate-500', label: 'slate' };
             return (
               <li key={i} className="group relative flex gap-4 pb-6 last:pb-1">
-                {i < timelineEvents.length - 1 && <span className="absolute top-9 left-[15px] h-[calc(100%-2rem)] w-px bg-slate-200 transition-colors group-hover:bg-blue-400/60 dark:bg-white/10" />}
+                {i < events.length - 1 && <span className="absolute top-9 left-[15px] h-[calc(100%-2rem)] w-px bg-slate-200 transition-colors group-hover:bg-blue-400/60 dark:bg-white/10" />}
                 <span className={`z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border transition-transform duration-150 group-hover:scale-110 ${k.cls}`}>
                   <k.Icon size={14} />
                 </span>

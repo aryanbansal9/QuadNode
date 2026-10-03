@@ -33,16 +33,18 @@ function ChartTooltip({ active, payload, label }) {
 export default function Overview() {
   const { isOffline, simulateOffline, restoreConnection, simulateSync, isSyncing, backend, pendingCount, edgeAvailable } = useConnection();
   const { isDark } = useTheme();
-  const edgeMemories = backend?.edge_memories ?? dashboardStats.localMemories;
-  const pending = backend?.pending_sync ?? pendingCount ?? dashboardStats.pendingSync;
-  const cloudMemories = backend?.cloud_memories ?? null;
+  
+  // LIVE HYBRID MAPPING: Uses actual FastAPI schema if available, otherwise mock.
+  const edgeMemories = backend?.edge?.total ?? dashboardStats.localMemories;
+  const pending = backend?.edge?.PENDING ?? pendingCount ?? dashboardStats.pendingSync;
+  const cloudMemories = backend?.cloud_memories ?? 1248;
+  const localSecured = backend?.edge?.LOCAL_ONLY ?? 312;
 
-  // Live distribution chart — sourced ONLY from GET /status (or dashboard fallback).
   const dist = [
-    { name: 'Edge', value: backend?.edge_memories ?? dashboardStats.localMemories, color: isDark ? '#22d3ee' : '#2563eb' },
-    { name: 'Cloud', value: backend?.cloud_memories ?? 1248, color: isDark ? '#818cf8' : '#7c3aed' },
-    { name: 'Pending', value: backend?.pending_sync ?? dashboardStats.pendingSync, color: '#f59e0b' },
-    { name: 'Local-only', value: backend?.local_only_secured ?? 312, color: isDark ? '#64748b' : '#94a3b8' },
+    { name: 'Edge', value: edgeMemories, color: isDark ? '#22d3ee' : '#2563eb' },
+    { name: 'Cloud', value: cloudMemories, color: isDark ? '#818cf8' : '#7c3aed' },
+    { name: 'Pending', value: pending, color: '#f59e0b' },
+    { name: 'Local-only', value: localSecured, color: isDark ? '#64748b' : '#94a3b8' },
   ];
   const grid = isDark ? 'rgba(148,163,184,0.12)' : '#e2e8f0';
   const tick = isDark ? '#64748b' : '#94a3b8';
@@ -60,7 +62,7 @@ export default function Overview() {
             ) : (
               <Button variant="secondary" size="sm" onClick={simulateOffline}><WifiOff size={14} /> Simulate cloud offline</Button>
             )}
-            <Button size="sm" onClick={simulateSync} disabled={isSyncing}>
+            <Button size="sm" onClick={simulateSync} disabled={isSyncing || isOffline}>
               <RefreshCw size={14} className={isSyncing ? 'animate-spin' : ''} /> {isSyncing ? 'Syncing…' : 'Sync now'}
             </Button>
           </>
@@ -70,51 +72,14 @@ export default function Overview() {
       <div className="grid grid-cols-2 gap-3 xl:grid-cols-5">
         <MetricCard index={0} accent="blue" live={!!backend} label="Edge Memories" value={String(edgeMemories)} sub={backend ? 'live · Qdrant Edge' : '+12 this week'} icon={Database} />
         <MetricCard index={1} accent="amber" live={!!backend} label="Pending Sync" value={String(pending)} sub="queued for server" icon={RefreshCw} tone="text-amber-600 dark:text-amber-300" />
-        <MetricCard index={2} accent="orange" label="Conflicts" value={dashboardStats.conflicts} sub="needs review · demo" icon={GitBranch} tone="text-orange-600 dark:text-orange-300" alert />
+        <MetricCard index={2} accent="orange" label="Conflicts" value={backend?.edge?.CONFLICT ?? dashboardStats.conflicts} sub="needs review" icon={GitBranch} tone="text-orange-600 dark:text-orange-300" alert />
         <MetricCard index={3} accent="violet" label="AI Queries" value={dashboardStats.aiQueries} sub="last 30 days · local" icon={MessageSquare} />
         <MetricCard index={4} accent="slate" label="Storage" value="68%" sub="41.2 GB of 60 GB" icon={HardDrive} />
       </div>
-      {backend && (
-        <p className="mt-2 font-mono text-[11px] text-slate-400 dark:text-slate-500">
-          LIVE EDGE · cloud memories {cloudMemories} · local-only secured {backend.local_only_secured} · cache {backend.cache_size}
-          {edgeAvailable === false ? ' · EDGE BACKEND UNREACHABLE' : ''}
-        </p>
-      )}
 
       <div className="mt-4 grid gap-4 lg:grid-cols-3">
-        {/* System status */}
-        <Card className="card-enter stagger-2 lg:col-span-2">
-          <CardHeader title="System Status" subtitle="Local-first services on EDGE-001" right={<Badge tone="emerald">5 / 5 nominal</Badge>} />
-          <ul className="divide-y divide-slate-200/70 dark:divide-white/10">
-            {systemStatus.map((s) => (
-              <li key={s.id} className="flex items-center gap-3 px-4 py-3">
-                <span className={`h-2 w-2 shrink-0 rounded-full ${s.id === 'net' && isOffline ? 'bg-red-500' : 'bg-emerald-500'} ${s.id === 'net' || s.id === 'sync' ? 'status-dot-live' : ''}`} />
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-medium text-slate-800 dark:text-slate-200">{s.label}</p>
-                  <p className="truncate font-mono text-[11px] text-slate-400 dark:text-slate-500">{s.detail}</p>
-                </div>
-                {s.id === 'net' ? (
-                  <Badge tone={isOffline ? 'red' : 'emerald'} dot>{isOffline ? 'OFFLINE' : 'ONLINE'}</Badge>
-                ) : s.id === 'sync' ? (
-                  <Badge tone={isOffline ? 'red' : isSyncing ? 'amber' : 'emerald'} dot>
-                    {isOffline ? 'WAITING' : isSyncing ? 'SYNCING' : 'SYNCED'}
-                  </Badge>
-                ) : (
-                  <Badge tone="emerald">{s.state}</Badge>
-                )}
-              </li>
-            ))}
-          </ul>
-          {isOffline && (
-            <div className="flex items-center gap-2 border-t border-slate-200 px-4 py-3 text-xs text-slate-500 dark:border-white/10 dark:text-slate-400">
-              <AlertTriangle size={14} className="text-amber-500 dark:text-amber-300" />
-              Cloud synchronization unavailable — local services continue uninterrupted.
-            </div>
-          )}
-        </Card>
-
         {/* Memory distribution chart */}
-        <Card className="card-enter stagger-3">
+        <Card className="card-enter stagger-3 lg:col-span-2">
           <CardHeader title="Memory distribution" subtitle={backend ? 'live · GET /status' : 'demo snapshot'} right={<Cloud size={14} className="text-slate-400" />} />
           <div className="h-[228px] px-2 py-3">
             <ResponsiveContainer width="100%" height="100%">
@@ -130,10 +95,8 @@ export default function Overview() {
             </ResponsiveContainer>
           </div>
         </Card>
-      </div>
-
-      <div className="mt-4 grid gap-4 lg:grid-cols-3">
-        {/* Device health */}
+        
+        {/* Device health (Retained Frontend Feature) */}
         <Card className="card-enter stagger-3">
           <CardHeader title="Edge Device Health" subtitle="EDGE-001 · live" />
           <div className="space-y-4 px-4 py-4">
@@ -151,38 +114,10 @@ export default function Overview() {
               </div>
             ))}
             <dl className="space-y-2 border-t border-slate-200 pt-3 text-xs dark:border-white/10">
-              <div className="flex justify-between"><dt className="text-slate-400 dark:text-slate-500">Local model</dt><dd className="font-mono text-slate-700 dark:text-slate-300">{deviceHealth.localModel}</dd></div>
-              <div className="flex justify-between"><dt className="text-slate-400 dark:text-slate-500">Embedding model</dt><dd className="font-mono text-slate-700 dark:text-slate-300">{deviceHealth.embeddingModel}</dd></div>
+              <div className="flex justify-between"><dt className="text-slate-400 dark:text-slate-500">Local model</dt><dd className="font-mono text-slate-700 dark:text-slate-300">{backend?.llm_model ?? deviceHealth.localModel}</dd></div>
               <div className="flex justify-between"><dt className="text-slate-400 dark:text-slate-500">Uptime</dt><dd className="tnum font-mono text-slate-700 dark:text-slate-300">{deviceHealth.uptime}</dd></div>
-              <div className="flex justify-between"><dt className="text-slate-400 dark:text-slate-500">Core temp</dt><dd className="tnum font-mono text-slate-700 dark:text-slate-300">{deviceHealth.temperature}</dd></div>
             </dl>
           </div>
-        </Card>
-
-        {/* Memory activity */}
-        <Card className="card-enter stagger-4 lg:col-span-2">
-          <CardHeader
-            title="Memory Activity"
-            subtitle="Remember → retrieve → reason → synchronize"
-            right={<span className="flex items-center gap-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-300"><CheckCircle2 size={13} /> Qdrant Edge writable</span>}
-          />
-          <ol className="grid px-4 py-2 sm:grid-cols-2 sm:gap-x-6">
-            {memoryActivity.map((a, i) => (
-              <li key={i} className="flex gap-3 py-2.5">
-                <div className="flex flex-col items-center">
-                  <span className={`flex h-6 w-6 items-center justify-center rounded-lg text-[10px] font-bold ${iconFor(a.kind)}`}>·</span>
-                  {i < memoryActivity.length - 1 && <span className="mt-1 w-px flex-1 bg-slate-200 dark:bg-white/10" />}
-                </div>
-                <div className="min-w-0 flex-1 pb-1">
-                  <div className="flex flex-wrap items-baseline gap-x-3">
-                    <span className="tnum font-mono text-[11px] text-slate-400 dark:text-slate-500">{a.time}</span>
-                    <p className="text-[13px] font-medium text-slate-800 dark:text-slate-200">{a.event}</p>
-                  </div>
-                  <p className="truncate text-xs text-slate-400 dark:text-slate-500">{a.detail}</p>
-                </div>
-              </li>
-            ))}
-          </ol>
         </Card>
       </div>
     </div>

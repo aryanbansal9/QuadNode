@@ -8,6 +8,11 @@ export default function Topbar({ onMenu }) {
   const { status, lastSyncLabel, backend } = useConnection();
   const StatusIcon = status === CONNECTION.OFFLINE ? WifiOff : status === CONNECTION.SYNCING ? Loader2 : Wifi;
 
+  // Live Hybrid Mapping
+  const liveEdge = backend?.edge?.total ?? 0;
+  const liveCloud = backend?.cloud_memories ?? 0;
+  const livePending = backend?.edge?.PENDING ?? 0;
+
   return (
     <header className="qn-topbar sticky top-0 z-20 border-b border-slate-200/80 bg-white/85 backdrop-blur-md dark:border-white/10 dark:bg-[#070A0F]/85">
       <div className="flex h-[52px] items-center gap-2.5 px-4 lg:px-6">
@@ -31,7 +36,7 @@ export default function Topbar({ onMenu }) {
           )}
           role="status"
           aria-live="polite"
-          title={backend ? `Edge ${backend.edge_memories} · Cloud ${backend.cloud_memories} · Pending ${backend.pending_sync}` : 'Edge telemetry'}
+          title={`Edge: ${liveEdge} | Cloud: ${liveCloud} | Pending: ${livePending}`}
         >
           <StatusIcon size={13} className={cx(
             status === CONNECTION.ONLINE && 'text-emerald-500 dark:text-emerald-300',

@@ -5,10 +5,8 @@ import MetricCard from '../components/common/MetricCard';
 import Badge, { SyncBadge } from '../components/common/Badge';
 import Button from '../components/common/Button';
 import ConnectionIndicator from '../components/common/ConnectionIndicator';
-import { syncQueue, syncMetrics } from '../data/sync';
 import { useConnection } from '../context/ConnectionContext';
 import { memoryService } from '../api/services';
-import { USE_MOCK } from '../api/client';
 import { cx } from '../utils/format';
 
 const flowStages = [
@@ -19,46 +17,48 @@ const flowStages = [
 ];
 
 export default function Synchronization() {
-  const { status, isOffline, isSyncing, syncProgress, simulateOffline, restoreConnection, simulateSync, backend, pendingCount, cloudSimulatedOffline } = useConnection();
+  const { status, isOffline, isSyncing, syncProgress, simulateOffline, restoreConnection, simulateSync, backend, pendingCount } = useConnection();
   const [realRows, setRealRows] = useState([]);
   const [syncMsg, setSyncMsg] = useState('');
 
   const loadQueue = async () => {
-    if (USE_MOCK) return;
     try {
       const rows = await memoryService.list(100);
-      setRealRows(Array.isArray(rows) ? rows : []);
-    } catch { /* keep mock rows */ }
+      setRealRows(Array.isArray(rows.items) ? rows.items : []);
+    } catch { 
+      setRealRows([]); 
+    }
   };
 
   useEffect(() => { loadQueue(); }, [pendingCount]);
   useEffect(() => { loadQueue(); }, []);
 
-  const queue = [
-    ...realRows
-      .filter((r) => r.sync_status === 'PENDING' || r.sync_status === 'SYNCED' || r.sync_status === 'LOCAL_ONLY')
-      .slice(0, 20)
-      .map((r) => ({
-        id: String(r.id).slice(0, 8),
-        title: (r.text || '').slice(0, 60) || '(empty)',
-        status: r.sync_status,
-        created: r.timestamp ? new Date(r.timestamp * 1000).toLocaleString() : '—',
-        lastAttempt: '—',
-        size: 'live · edge',
-        live: true,
-      })),
-    ...syncQueue,
-  ];
+  // Use ONLY actual backend data
+  const queue = realRows
+    .filter((r) => r.sync_status === 'PENDING' || r.sync_status === 'SYNCED' || r.sync_status === 'LOCAL_ONLY')
+    .slice(0, 20)
+    .map((r) => ({
+      id: String(r.id).slice(0, 8),
+      title: (r.text || '').slice(0, 60) || '(empty)',
+      status: r.sync_status,
+      created: r.timestamp ? new Date(r.timestamp * 1000).toLocaleString() : '—',
+      lastAttempt: '—',
+      size: 'live · edge',
+      live: true,
+    }));
 
-  const pending = backend?.pending_sync ?? pendingCount ?? syncMetrics.pending;
-  const synced = backend?.cloud_memories ?? 1248;
+  // EXACT KPIs from Backend
+  const pending = backend?.edge?.PENDING || 0;
+  const synced = backend?.cloud_memories || 0;
+  const conflicts = backend?.edge?.CONFLICT || 0;
+  const failed = 0; // We don't track persistent failures in this MVP
 
   const onSync = async () => {
     setSyncMsg('');
     const res = await simulateSync();
-    if (res?.queued) setSyncMsg(cloudSimulatedOffline ? 'Cloud offline (simulated) — memories stay queued locally. Restore connection, then Sync now.' : 'Sync queued.');
-    else if (res?.ok === false) setSyncMsg(`Sync failed: ${res.error} — edge backend unreachable?`);
-    else if (typeof res?.synced_count === 'number') setSyncMsg(`Synced ${res.synced_count} memor${res.synced_count === 1 ? 'y' : 'ies'} to cloud.`);
+    if (res?.queued) setSyncMsg('Cloud offline — memories stay queued locally. Restore connection to push.');
+    else if (res?.ok === false) setSyncMsg(`Sync failed: ${res.error}`);
+    else setSyncMsg(`Sync successful.`);
     loadQueue();
   };
 
@@ -75,7 +75,7 @@ export default function Synchronization() {
             ) : (
               <Button variant="warn" size="sm" onClick={simulateOffline}><WifiOff size={14} /> Simulate cloud offline</Button>
             )}
-            <Button size="sm" onClick={onSync} disabled={isSyncing || (isOffline && !USE_MOCK && cloudSimulatedOffline)}>
+            <Button size="sm" onClick={onSync} disabled={isSyncing || isOffline}>
               {isSyncing ? <RefreshCw size={14} className="animate-spin" /> : <Play size={14} />} {isSyncing ? `Syncing ${Math.round(syncProgress)}%` : 'Sync now'}
             </Button>
           </>
@@ -94,10 +94,10 @@ export default function Synchronization() {
       </Card>
 
       <div className="mt-4 grid grid-cols-2 gap-3 xl:grid-cols-4">
-        <MetricCard index={0} accent="amber" live={!!backend} label="Pending" value={String(pending)} sub="awaiting uplink · live" tone="text-amber-600 dark:text-amber-300" />
-        <MetricCard index={1} accent="emerald" live={!!backend} label="Synced" value={String(synced)} sub="total vectors on server · live" tone="text-emerald-600 dark:text-emerald-300" />
-        <MetricCard index={2} accent="slate" label="Failed" value={syncMetrics.failed} sub="will retry automatically" />
-        <MetricCard index={3} accent="orange" label="Conflicts" value={syncMetrics.conflicts} sub="demo dataset" alert />
+        <MetricCard index={0} accent="amber" live={true} label="Pending" value={String(pending)} sub="awaiting uplink · live" tone="text-amber-600 dark:text-amber-300" />
+        <MetricCard index={1} accent="emerald" live={true} label="Synced" value={String(synced)} sub="total vectors on server · live" tone="text-emerald-600 dark:text-emerald-300" />
+        <MetricCard index={2} accent="slate" label="Failed" value={String(failed)} sub="will retry automatically" />
+        <MetricCard index={3} accent="orange" label="Conflicts" value={String(conflicts)} sub="live collisions" alert={conflicts > 0} />
       </div>
       {syncMsg && (
         <p className="card-enter mt-3 rounded-xl border border-slate-200 bg-white px-4 py-2.5 font-mono text-[11px] text-slate-600 dark:border-white/10 dark:bg-black/30 dark:text-slate-300" role="status">{syncMsg}</p>
@@ -158,6 +158,9 @@ export default function Synchronization() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200/70 dark:divide-white/10">
+              {queue.length === 0 && (
+                <tr><td colSpan="5" className="py-6 text-center text-xs text-slate-400">Queue is empty.</td></tr>
+              )}
               {queue.map((q) => (
                 <tr key={q.id} className="qn-table-row transition-colors hover:bg-slate-50 dark:hover:bg-white/[0.03]">
                   <td className="px-4 py-2.5">
